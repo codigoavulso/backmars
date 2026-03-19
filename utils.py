@@ -1,0 +1,87 @@
+from __future__ import annotations
+
+import json
+from functools import wraps
+from typing import Any, Callable
+
+import bcrypt
+from flask import jsonify, session
+from werkzeug.security import check_password_hash, generate_password_hash
+
+PREFERRED_PASSWORD_METHOD = "scrypt"
+LEGACY_BCRYPT_PREFIXES = ("$2a$", "$2b$", "$2y$")
+
+
+def hash_password(password: str) -> str:
+    return generate_password_hash(password, method=PREFERRED_PASSWORD_METHOD)
+
+
+def verify_password(password: str, password_hash: str) -> bool:
+    normalized_hash = str(password_hash or "")
+    if not normalized_hash:
+        return False
+    if is_legacy_bcrypt_hash(normalized_hash):
+        try:
+            return bcrypt.checkpw(
+                str(password).encode("utf-8"),
+                normalized_hash.encode("utf-8"),
+            )
+        except ValueError:
+            return False
+    try:
+        return check_password_hash(normalized_hash, password)
+    except ValueError:
+        return False
+
+
+def is_legacy_bcrypt_hash(password_hash: str) -> bool:
+    normalized_hash = str(password_hash or "")
+    return normalized_hash.startswith(LEGACY_BCRYPT_PREFIXES)
+
+
+def password_hash_needs_upgrade(password_hash: str) -> bool:
+    normalized_hash = str(password_hash or "")
+    if not normalized_hash:
+        return True
+    if is_legacy_bcrypt_hash(normalized_hash):
+        return True
+    return not normalized_hash.startswith(f"{PREFERRED_PASSWORD_METHOD}:")
+
+
+def current_user_id() -> int | None:
+    value = session.get("user_id")
+    try:
+        return int(value) if value is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
+def json_error(message: str, status: int = 400, **extra: Any) -> tuple[Any, int]:
+    payload = {"error": message}
+    payload.update(extra)
+    return jsonify(payload), status
+
+
+def coerce_project_document(payload: Any) -> dict[str, Any]:
+    if payload is None:
+        return {"files": {}, "settings": {}}
+    if isinstance(payload, str):
+        try:
+            payload = json.loads(payload)
+        except json.JSONDecodeError as exc:
+            raise ValueError("Project must be valid JSON.") from exc
+    if not isinstance(payload, dict):
+        raise ValueError("Project must be a JSON object.")
+    if "files" in payload and not isinstance(payload["files"], dict):
+        raise ValueError("Project field 'files' must be an object.")
+    return payload
+
+
+def login_required(view: Callable[..., Any]) -> Callable[..., Any]:
+    @wraps(view)
+    def wrapped(*args: Any, **kwargs: Any) -> Any:
+        if current_user_id() is None:
+            return json_error("Authentication required.", 401)
+        return view(*args, **kwargs)
+
+    return wrapped
