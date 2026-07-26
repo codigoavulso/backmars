@@ -8,6 +8,12 @@ from utils import current_user_id, hash_password, json_error, password_hash_need
 bp = Blueprint("auth", __name__)
 
 
+def establish_user_session(user_id: int) -> None:
+    session.clear()
+    session.permanent = True
+    session["user_id"] = user_id
+
+
 @bp.post("/api/register")
 def register() -> tuple[object, int]:
     data = request.get_json(silent=True) or {}
@@ -23,8 +29,7 @@ def register() -> tuple[object, int]:
         return json_error("Email already exists.", 409, field="email")
 
     user = create_user(username, email, hash_password(password))
-    session.clear()
-    session["user_id"] = user["id"]
+    establish_user_session(user["id"])
     return jsonify({"user": user}), 201
 
 
@@ -43,8 +48,7 @@ def login() -> tuple[object, int]:
     if password_hash_needs_upgrade(user["password_hash"]):
         update_user_password_hash(user["id"], hash_password(password))
 
-    session.clear()
-    session["user_id"] = user["id"]
+    establish_user_session(user["id"])
     return jsonify({"user": get_user_by_id(user["id"])}), 200
 
 

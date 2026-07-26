@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+from typing import Any
 
 from flask import Flask, jsonify, request
 from werkzeug.exceptions import HTTPException
@@ -10,12 +11,15 @@ from auth import bp as auth_bp
 from config import DevelopmentConfig, ProductionConfig
 from db import ensure_database, init_app as init_db_app
 from projects import bp as projects_bp
+from version import APP_VERSION
 
 
-def create_app() -> Flask:
+def create_app(config_overrides: dict[str, Any] | None = None) -> Flask:
     app = Flask(__name__, instance_relative_config=True)
     env = os.environ.get("WEBMARS_USERS_ENV", "development").lower()
     app.config.from_object(ProductionConfig if env == "production" else DevelopmentConfig)
+    if config_overrides:
+        app.config.update(config_overrides)
     Path(app.instance_path).mkdir(parents=True, exist_ok=True)
 
     init_db_app(app)
@@ -27,7 +31,11 @@ def create_app() -> Flask:
 
     @app.get("/api/health")
     def health() -> tuple[dict[str, object], int]:
-        return {"ok": True, "service": "webmars-users"}, 200
+        return {
+            "ok": True,
+            "service": "webmars-users",
+            "version": APP_VERSION,
+        }, 200
 
     @app.route("/api", methods=["OPTIONS"])
     @app.route("/api/<path:_path>", methods=["OPTIONS"])
