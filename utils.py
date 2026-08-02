@@ -5,7 +5,7 @@ from functools import wraps
 from typing import Any, Callable
 
 import bcrypt
-from flask import jsonify, session
+from flask import jsonify, request, session
 from werkzeug.security import check_password_hash, generate_password_hash
 
 PREFERRED_PASSWORD_METHOD = "scrypt"
@@ -54,6 +54,12 @@ def current_user_id() -> int | None:
         return int(value) if value is not None else None
     except (TypeError, ValueError):
         return None
+
+
+def client_address() -> str:
+    # ProxyFix has already rewritten remote_addr when a trusted proxy count is
+    # configured, so reading X-Forwarded-For here would only add a spoofable path.
+    return str(request.remote_addr or "unknown")
 
 
 def json_error(message: str, status: int = 400, **extra: Any) -> tuple[Any, int]:

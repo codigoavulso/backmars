@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import os
 import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
 from http.cookies import SimpleCookie
 from pathlib import Path
+
+os.environ.setdefault("WEBMARS_USERS_ENV", "development")
 
 from app import create_app
 from config import ProductionConfig
@@ -19,7 +22,7 @@ class PersistentAuthSessionTests(unittest.TestCase):
         response = self.client.get("/api/health")
 
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.get_json()["version"], "0.1.1")
+        self.assertEqual(response.get_json()["version"], "0.3.0")
 
     def setUp(self) -> None:
         self.temporary_directory = tempfile.TemporaryDirectory()

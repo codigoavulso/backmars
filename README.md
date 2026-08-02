@@ -1,8 +1,38 @@
-# WebMARS Users Service v0.1.1
+# WebMARS Users Service v0.3.0
 
 Small Flask backend for WebMARS user accounts and project storage. It is designed for small text-based workspaces and stores each project as one JSON document inside SQLite.
 
 Password hashing now uses Werkzeug `scrypt` for new passwords. Older `bcrypt` hashes are still accepted and are upgraded automatically on the next successful login, using the native `bcrypt` package to keep legacy logins fast.
+
+Runtime dependencies are pinned in `requirements.txt`; update them deliberately
+and rerun the complete test suite instead of allowing a deployment months later
+to resolve a different Flask/Werkzeug combination.
+
+## v0.3.0
+
+- startup requires an explicit `WEBMARS_USERS_ENV`; production can no longer silently inherit development mode
+- `PUT` and `DELETE` require `If-Match` and return `428` when the caller did not identify the version it read
+- version checks are part of the SQL mutation, closing the check-then-write race between concurrent workers
+- `GET /api/projects?include=documents` batches documents and ETags for the webMARS sync view
+- SQLite uses WAL, a busy timeout and normal synchronous mode for concurrent Gunicorn workers
+
+## v0.2.0
+
+- production refuses to start while `SECRET_KEY` is the development placeholder
+- request bodies are capped, so a project document cannot be used to fill the disk
+- repeated failed sign-ins from one address are turned away with `429`
+- project names are unique per user; a clash answers `409`
+- `GET /api/projects/<id>` returns an `ETag`, and `PUT` honours `If-Match` with `412`
+- `GET /api/projects` reports `serverTime` so clients can correct for clock skew
+
+### Upgrading from v0.1.1
+
+Set `SECRET_KEY` before restarting in production; the service now refuses to boot
+without it rather than signing sessions with a key that is public in this
+repository. Everything else migrates on first start: the schema is replayed
+(it is written with `IF NOT EXISTS`), and any pre-existing duplicate project
+names are renamed to `name (2)`, `name (3)` and so on before the unique index is
+created. No project is ever deleted by the migration.
 
 ## v0.1.1
 
@@ -40,6 +70,7 @@ Run from the `users/` folder:
 python -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
+export WEBMARS_USERS_ENV=development
 flask run
 ```
 
@@ -88,6 +119,10 @@ flask run
 Run from the `users/` folder:
 
 ```bash
+export WEBMARS_USERS_ENV=production
+export SECRET_KEY='replace-with-a-long-random-secret'
+export WEBMARS_USERS_TRUSTED_PROXIES=1
+export WEBMARS_USERS_ALLOWED_ORIGINS='https://webmars.nfiles.top'
 gunicorn app:app
 ```
 
@@ -101,14 +136,48 @@ The app also enables credentialed CORS for local WebMARS development from:
 ## API Summary
 
 - `POST /api/register`
-- `POST /api/login`
+- `POST /api/login` — `429` with `Retry-After` once an address has failed too often
 - `POST /api/logout`
 - `GET /api/me`
-- `GET /api/projects`
-- `POST /api/projects`
-- `GET /api/projects/<id>`
-- `PUT /api/projects/<id>`
-- `DELETE /api/projects/<id>`
+- `GET /api/projects` — also returns `serverTime`
+- `POST /api/projects` — `409` when the name is already taken
+- `GET /api/projects/<id>` — returns `ETag` and an `etag` field on the project
+- `PUT /api/projects/<id>` — requires `If-Match`; `412` when the stored copy moved on, `409` on a name clash, `428` when omitted
+- `DELETE /api/projects/<id>` — requires `If-Match`, with the same `412`/`428` precondition behaviour
+
+Any request body above `WEBMARS_USERS_MAX_CONTENT_LENGTH` (4 MB by default) is
+rejected with `413`.
+
+### Optimistic locking
+
+Read a project, keep its `etag`, and send it back as `If-Match` on the next
+`PUT`. If another session saved in the meantime the write is refused with `412`
+and the response carries the current project so the caller can merge without a
+second round trip. Mutation without `If-Match` is rejected with `428`; this is
+intentional because silently falling back to last-writer-wins would reintroduce
+the data-loss path optimistic locking is meant to close.
+
+### Configuration
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `SECRET_KEY` | *(none)* | Session signing key. Required in production. |
+| `WEBMARS_USERS_ENV` | *(none)* | Required: `development` or `production`. Startup refuses to guess. |
+| `WEBMARS_USERS_ALLOWED_ORIGINS` | *(empty)* | Extra comma-separated CORS origins. |
+| `WEBMARS_USERS_MAX_CONTENT_LENGTH` | `4194304` | Largest accepted request body, in bytes. |
+| `WEBMARS_USERS_LOGIN_MAX_ATTEMPTS` | `20` | Failed sign-ins per address before `429`. |
+| `WEBMARS_USERS_DATABASE_BUSY_TIMEOUT_MS` | `5000` | How long SQLite waits for a concurrent writer. |
+
+Browser writes whose `Origin` is not in the allowlist are rejected with `403`,
+including requests from an untrusted sibling subdomain. Requests without an
+`Origin` remain available to command-line administration clients.
+| `WEBMARS_USERS_LOGIN_WINDOW_SECONDS` | `900` | Window the failures are counted over. |
+| `WEBMARS_USERS_TRUSTED_PROXIES` | `0` | Above zero, read the client address from `X-Forwarded-For`. |
+| `SESSION_COOKIE_SAMESITE` | `Lax` | Set to `None` (with `Secure`) if the API moves to another registrable domain. |
+
+Behind NGINX set `WEBMARS_USERS_TRUSTED_PROXIES=1`, otherwise every request
+looks like it comes from the proxy and the login rate limit applies to all
+clients at once.
 
 Project payload example:
 

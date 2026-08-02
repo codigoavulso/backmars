@@ -14,7 +14,7 @@ if exist ".venv\Scripts\python.exe" (
   set "PYTHON=python"
 )
 
-%PYTHON% -c "import flask, passlib" >nul 2>nul
+%PYTHON% -c "import flask, bcrypt" >nul 2>nul
 if errorlevel 1 (
   echo Missing Python dependencies for the users service.
   echo Run one of the following from this folder:
@@ -25,6 +25,7 @@ if errorlevel 1 (
 
 set "FLASK_APP=app"
 set "FLASK_DEBUG=1"
+set "WEBMARS_USERS_ENV=development"
 
 echo WebMARS users service running at http://%HOST%:%PORT%/
 echo Press Ctrl+C to stop.
