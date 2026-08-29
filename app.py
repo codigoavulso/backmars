@@ -9,9 +9,11 @@ from werkzeug.exceptions import HTTPException
 from werkzeug.middleware.proxy_fix import ProxyFix
 
 from auth import bp as auth_bp
-from config import DEV_SECRET_KEY, DevelopmentConfig, ProductionConfig
+from config import BASE_DIR, DEV_SECRET_KEY, DevelopmentConfig, ProductionConfig
 from db import ensure_database, init_app as init_db_app
+from mailer import mail_is_configured
 from projects import bp as projects_bp
+from publications import bp as publications_bp
 from version import APP_VERSION
 
 
@@ -43,6 +45,10 @@ def create_app(config_overrides: dict[str, Any] | None = None) -> Flask:
     app.config.from_object(ProductionConfig if is_production else DevelopmentConfig)
     if config_overrides:
         app.config.update(config_overrides)
+    if not app.config.get("ACCOUNT_CODE_PEPPER_IS_SEPARATE"):
+        # Tests and embedded deployments often override SECRET_KEY after the
+        # Config class has been imported; keep the documented fallback aligned.
+        app.config["ACCOUNT_CODE_PEPPER"] = app.config["SECRET_KEY"]
     Path(app.instance_path).mkdir(parents=True, exist_ok=True)
 
     if app.config.get("SECRET_KEY") == DEV_SECRET_KEY:
@@ -56,6 +62,46 @@ def create_app(config_overrides: dict[str, Any] | None = None) -> Flask:
             "SECRET_KEY is the development placeholder; sessions are forgeable. "
             "Never run this configuration outside a local machine."
         )
+    if app.config.get("MAIL_ENABLED"):
+        if not app.config.get("MAIL_FROM") or not app.config.get("SMTP_HOST"):
+            raise RuntimeError(
+                "Transactional mail is enabled but BACKMARS_MAIL_FROM or "
+                "BACKMARS_SMTP_HOST is missing."
+            )
+        if app.config.get("SMTP_USERNAME") and not app.config.get("SMTP_PASSWORD"):
+            raise RuntimeError(
+                "BACKMARS_SMTP_USERNAME is configured but BACKMARS_SMTP_PASSWORD is missing."
+            )
+        security = str(app.config.get("SMTP_SECURITY", "")).lower()
+        if security not in {"starttls", "ssl", "tls", "none"}:
+            raise RuntimeError(
+                "BACKMARS_SMTP_SECURITY must be starttls, ssl, tls or none."
+            )
+        if is_production and security == "none":
+            raise RuntimeError("Production transactional mail must use TLS.")
+        if is_production and not app.config.get("ACCOUNT_CODE_PEPPER_IS_SEPARATE"):
+            raise RuntimeError(
+                "BACKMARS_ACCOUNT_CODE_PEPPER must be a separate random secret in production."
+            )
+    if is_production:
+        database_path = Path(app.config["DATABASE"]).expanduser()
+        if not database_path.is_absolute() or database_path.resolve().is_relative_to(BASE_DIR.resolve()):
+            raise RuntimeError(
+                "Production DATABASE must be an absolute path outside the BackMars code checkout."
+            )
+        mail_configured = bool(
+            callable(app.config.get("MAIL_SEND_FUNCTION"))
+            or (
+                app.config.get("MAIL_ENABLED")
+                and app.config.get("MAIL_FROM")
+                and app.config.get("SMTP_HOST")
+            )
+        )
+        if app.config.get("REQUIRE_VERIFIED_EMAIL_FOR_PUBLISH") and not mail_configured:
+            raise RuntimeError(
+                "Email verification is required for publishing, but transactional mail is disabled. "
+                "Configure SMTP or explicitly set BACKMARS_REQUIRE_VERIFIED_EMAIL_FOR_PUBLISH=0."
+            )
 
     # Only trust X-Forwarded-For when a proxy is declared, otherwise a client
     # could set the header itself and step around the login rate limit.
@@ -66,6 +112,7 @@ def create_app(config_overrides: dict[str, Any] | None = None) -> Flask:
     init_db_app(app)
     app.register_blueprint(auth_bp)
     app.register_blueprint(projects_bp)
+    app.register_blueprint(publications_bp)
 
     with app.app_context():
         ensure_database()
@@ -76,6 +123,7 @@ def create_app(config_overrides: dict[str, Any] | None = None) -> Flask:
             "ok": True,
             "service": "webmars-users",
             "version": APP_VERSION,
+            "mailConfigured": mail_is_configured(),
         }, 200
 
     @app.route("/api", methods=["OPTIONS"])

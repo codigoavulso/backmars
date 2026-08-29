@@ -22,7 +22,7 @@ class PersistentAuthSessionTests(unittest.TestCase):
         response = self.client.get("/api/health")
 
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.get_json()["version"], "0.3.0")
+        self.assertEqual(response.get_json()["version"], "0.4.0")
 
     def setUp(self) -> None:
         self.temporary_directory = tempfile.TemporaryDirectory()

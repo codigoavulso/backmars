@@ -56,6 +56,23 @@ def current_user_id() -> int | None:
         return None
 
 
+def session_is_current() -> bool:
+    user_id = current_user_id()
+    if user_id is None:
+        return False
+    # Lazy import avoids making models -> utils -> models a module cycle.
+    from models import get_user_session_version
+
+    stored_version = get_user_session_version(user_id)
+    if stored_version is None:
+        return False
+    try:
+        cookie_version = int(session.get("session_version", 0) or 0)
+    except (TypeError, ValueError):
+        return False
+    return cookie_version == stored_version
+
+
 def client_address() -> str:
     # ProxyFix has already rewritten remote_addr when a trusted proxy count is
     # configured, so reading X-Forwarded-For here would only add a spoofable path.
@@ -68,7 +85,7 @@ def json_error(message: str, status: int = 400, **extra: Any) -> tuple[Any, int]
     return jsonify(payload), status
 
 
-def coerce_project_document(payload: Any) -> dict[str, Any]:
+def coerce_project_document(payload: Any, *, allow_file_list: bool = False) -> dict[str, Any]:
     if payload is None:
         return {"files": {}, "settings": {}}
     if isinstance(payload, str):
@@ -79,14 +96,17 @@ def coerce_project_document(payload: Any) -> dict[str, Any]:
     if not isinstance(payload, dict):
         raise ValueError("Project must be a JSON object.")
     if "files" in payload and not isinstance(payload["files"], dict):
-        raise ValueError("Project field 'files' must be an object.")
+        if not (allow_file_list and isinstance(payload["files"], list)):
+            expected = "an object or array" if allow_file_list else "an object"
+            raise ValueError(f"Project field 'files' must be {expected}.")
     return payload
 
 
 def login_required(view: Callable[..., Any]) -> Callable[..., Any]:
     @wraps(view)
     def wrapped(*args: Any, **kwargs: Any) -> Any:
-        if current_user_id() is None:
+        if not session_is_current():
+            session.clear()
             return json_error("Authentication required.", 401)
         return view(*args, **kwargs)
 

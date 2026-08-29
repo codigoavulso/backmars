@@ -37,10 +37,26 @@ class SecretKeyGuardTests(unittest.TestCase):
                     {
                         "SECRET_KEY": "a-real-production-secret",
                         "DATABASE": Path(directory) / "test.db",
+                        "REQUIRE_VERIFIED_EMAIL_FOR_PUBLISH": False,
                     }
                 )
 
         self.assertFalse(app.config["DEBUG"])
+
+    def test_production_refuses_verified_publishing_without_mail(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            with mock.patch.dict(os.environ, {"WEBMARS_USERS_ENV": "production"}):
+                with self.assertRaises(RuntimeError) as raised:
+                    create_app(
+                        {
+                            "SECRET_KEY": "a-real-production-secret",
+                            "DATABASE": Path(directory) / "test.db",
+                            "MAIL_ENABLED": False,
+                            "REQUIRE_VERIFIED_EMAIL_FOR_PUBLISH": True,
+                        }
+                    )
+
+        self.assertIn("verification", str(raised.exception).lower())
 
     def test_development_still_starts_but_warns(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -118,7 +134,7 @@ class LoginRateLimitTests(ServiceTestCase):
 
         self.assertEqual(response.status_code, 429)
 
-    def test_a_successful_login_clears_the_counter(self) -> None:
+    def test_a_successful_login_does_not_reset_the_address_counter(self) -> None:
         self.register()
         self.client.post("/api/logout", json={})
         self.fail_login()
@@ -131,8 +147,8 @@ class LoginRateLimitTests(ServiceTestCase):
         self.assertEqual(good.status_code, 200)
 
         self.client.post("/api/logout", json={})
-        for _ in range(3):
-            self.assertEqual(self.fail_login().status_code, 401)
+        self.assertEqual(self.fail_login().status_code, 401)
+        self.assertEqual(self.fail_login().status_code, 429)
 
     def test_the_forwarded_header_cannot_shed_the_limit_without_a_trusted_proxy(self) -> None:
         self.register()
@@ -147,6 +163,40 @@ class LoginRateLimitTests(ServiceTestCase):
         )
 
         self.assertEqual(response.status_code, 429)
+
+
+class RegistrationGuardTests(ServiceTestCase):
+    config_overrides = {
+        "REGISTER_MAX_ATTEMPTS": 1,
+        "REGISTER_ATTEMPT_WINDOW_SECONDS": 3600,
+        "PASSWORD_MAX_LENGTH": 32,
+    }
+
+    def test_registration_is_limited_before_another_password_hash(self) -> None:
+        self.assertEqual(self.register(password="short enough").status_code, 201)
+        limited = self.client.post(
+            "/api/register",
+            json={
+                "username": "another-user",
+                "email": "another@example.com",
+                "password": "short enough",
+            },
+        )
+        self.assertEqual(limited.status_code, 429)
+        self.assertIn("Retry-After", limited.headers)
+
+    def test_oversized_password_and_non_object_json_are_rejected(self) -> None:
+        oversized = self.client.post(
+            "/api/register",
+            json={
+                "username": "long-password",
+                "email": "long@example.com",
+                "password": "x" * 33,
+            },
+        )
+        malformed = self.client.post("/api/register", json=["not", "an", "object"])
+        self.assertEqual(oversized.status_code, 400)
+        self.assertEqual(malformed.status_code, 400)
 
 
 class RequestSizeLimitTests(ServiceTestCase):

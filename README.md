@@ -1,198 +1,183 @@
-# WebMARS Users Service v0.3.0
+# BackMars v0.4.0
 
-Small Flask backend for WebMARS user accounts and project storage. It is designed for small text-based workspaces and stores each project as one JSON document inside SQLite.
+BackMars is the optional, self-hostable service for webMARS accounts, private
+Cloud projects, email-based account recovery and the per-installation Public
+Library. It is a small Flask application backed by SQLite and contains no
+vendor-specific mail dependency: any standards-compliant SMTP relay works.
 
-Password hashing now uses Werkzeug `scrypt` for new passwords. Older `bcrypt` hashes are still accepted and are upgraded automatically on the next successful login, using the native `bcrypt` package to keep legacy logins fast.
+The webMARS assembler, simulator, tools and local project storage do not depend
+on BackMars. Each university or teacher may operate an independent instance;
+accounts and first-come public names belong only to that instance.
 
-Runtime dependencies are pinned in `requirements.txt`; update them deliberately
-and rerun the complete test suite instead of allowing a deployment months later
-to resolve a different Flask/Werkzeug combination.
+## v0.4.0
 
-## v0.3.0
+- Password recovery and email verification through six-digit, short-lived,
+  one-use codes. Only keyed digests are stored; resetting a password revokes
+  all older sessions.
+- SMTP delivery with STARTTLS or implicit TLS, optional asynchronous dispatch,
+  provider-neutral settings and production guards against plaintext secrets.
+- Public examples/exercises with permanent first-come slugs, searchable public
+  metadata, anonymous reads, unlisted items and immutable numbered revisions.
+- Pinned revision metadata and content are snapshotted together. Ordinary
+  archive hides the mutable latest URL but keeps `/p/name@N` durable; names are
+  never released.
+- Server-side publication sanitization strips Cloud/UI/runtime state and accepts
+  only bounded, relative text-source files.
+- Additive schema migrations, session-version revocation, registration/code
+  rate limits, input bounds and production database/path/permission guards.
 
-- startup requires an explicit `WEBMARS_USERS_ENV`; production can no longer silently inherit development mode
-- `PUT` and `DELETE` require `If-Match` and return `428` when the caller did not identify the version it read
-- version checks are part of the SQL mutation, closing the check-then-write race between concurrent workers
-- `GET /api/projects?include=documents` batches documents and ETags for the webMARS sync view
-- SQLite uses WAL, a busy timeout and normal synchronous mode for concurrent Gunicorn workers
-
-## v0.2.0
-
-- production refuses to start while `SECRET_KEY` is the development placeholder
-- request bodies are capped, so a project document cannot be used to fill the disk
-- repeated failed sign-ins from one address are turned away with `429`
-- project names are unique per user; a clash answers `409`
-- `GET /api/projects/<id>` returns an `ETag`, and `PUT` honours `If-Match` with `412`
-- `GET /api/projects` reports `serverTime` so clients can correct for clock skew
-
-### Upgrading from v0.1.1
-
-Set `SECRET_KEY` before restarting in production; the service now refuses to boot
-without it rather than signing sessions with a key that is public in this
-repository. Everything else migrates on first start: the schema is replayed
-(it is written with `IF NOT EXISTS`), and any pre-existing duplicate project
-names are renamed to `name (2)`, `name (3)` and so on before the unique index is
-created. No project is ever deleted by the migration.
-
-## v0.1.1
-
-- persistent authenticated sessions for up to 365 days
-- session restoration across page refreshes and browser restarts
-- immediate cookie revocation on logout
-- secure production cookies and non-sliding absolute expiry
-- health endpoint version reporting and authentication regression tests
-
-## What It Does
-
-- register and log in users with session cookies
-- keep authenticated sessions across refreshes and browser restarts for up to 365 days
-- store projects per user
-- load a single project
-- list user projects
-- update and delete projects
-
-## Project Layout
-
-- `app.py`: Flask app entry point and app factory
-- `auth.py`: auth endpoints
-- `projects.py`: project CRUD endpoints
-- `db.py`: SQLite connection lifecycle and database bootstrap
-- `models.py`: compact data-access helpers
-- `utils.py`: password hashing and auth helpers
-- `schema.sql`: SQLite schema
-- `data/app.db`: SQLite database file
+Earlier v0.3 behavior remains: permanent sessions, ETag/`If-Match` optimistic
+locking, batched Cloud sync, request limits, login throttling, WAL and safe
+case-insensitive project names.
 
 ## Development
 
-Run from the `users/` folder:
+Python 3.11 or newer is recommended.
 
 ```bash
 python -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
 export WEBMARS_USERS_ENV=development
-flask run
-```
-
-If your Flask install does not auto-detect `app.py`, use:
-
-```bash
 flask --app app run
 ```
 
-The API will be available at `http://localhost:5000`.
+On Windows activate with `.venv\Scripts\activate` or use `start-web.bat`.
+The development API is `http://localhost:5000`; the webMARS development server
+normally runs at `http://localhost:8080`.
 
-Authentication cookies are `HttpOnly`, permanent for 365 days from login or
-registration, and removed immediately by `POST /api/logout`. The expiry is not
-silently extended on every request. Production mode marks the cookie `Secure`
-by default; set `SESSION_COOKIE_SECURE=0` only for an intentional HTTP-only
-deployment.
-
-On Windows you can also just run:
-
-```bat
-start-web.bat
-```
-
-That script starts the Flask dev server on `http://localhost:5000`. You can override it with `WEBMARS_USERS_HOST` and `WEBMARS_USERS_PORT`.
-
-For local WebMARS integration, prefer running both services on `localhost`:
-
-- frontend: `http://localhost:8080`
-- users service: `http://localhost:5000`
-
-That keeps the browser session cookie flow simpler during development.
-
-## Database Initialization
-
-No manual step is required. On first startup the service creates `data/app.db` automatically from `schema.sql`.
-
-If you want a clean reset during development:
+Run the suite with the virtual environment interpreter:
 
 ```bash
-rm -f data/app.db
-flask run
+python -m unittest discover -s tests -v
 ```
 
-## Gunicorn
+## Production invariants
 
-Run from the `users/` folder:
+BackMars refuses to start when a production configuration would be unsafe or
+non-functional. In production:
 
-```bash
-export WEBMARS_USERS_ENV=production
-export SECRET_KEY='replace-with-a-long-random-secret'
-export WEBMARS_USERS_TRUSTED_PROXIES=1
-export WEBMARS_USERS_ALLOWED_ORIGINS='https://webmars.nfiles.top'
-gunicorn app:app
-```
+- `WEBMARS_USERS_ENV=production` is mandatory.
+- `SECRET_KEY` must not be the public development placeholder.
+- `BACKMARS_DATABASE` must be an absolute path outside the code checkout.
+- If verified email is required for publishing, transactional mail must work.
+- SMTP security must be `starttls`, `ssl`/`tls`, or explicit `none`; production
+  refuses `none`.
+- Authenticated SMTP without TLS is refused in every environment.
+- When mail is enabled, the account-code pepper must be independent of the
+  session secret.
 
-Typical production deployment is `NGINX -> Gunicorn -> Flask`.
+Use `backmars.env.example` as a field reference and follow
+[`DEPLOYMENT.md`](DEPLOYMENT.md). Never commit real credentials.
 
-The app also enables credentialed CORS for local WebMARS development from:
+## API
 
-- `http://localhost:8080`
-- `http://127.0.0.1:8080`
+### Health and accounts
 
-## API Summary
+- `GET /api/health` — service/version and `mailConfigured`.
+- `POST /api/register` — creates account/session; queues verification mail.
+- `POST /api/login` — username or email; failed attempts are rate limited.
+- `POST /api/logout` — invalidates the browser cookie immediately.
+- `GET /api/me` — current session and `emailVerified` state.
+- `POST /api/password-reset/request` — always returns the same accepted response
+  for known and unknown valid email addresses.
+- `POST /api/password-reset/confirm` — email, temporary code and new password.
+- `POST /api/email-verification/request` — authenticated resend.
+- `POST /api/email-verification/confirm` — authenticated code confirmation.
 
-- `POST /api/register`
-- `POST /api/login` — `429` with `Retry-After` once an address has failed too often
-- `POST /api/logout`
-- `GET /api/me`
-- `GET /api/projects` — also returns `serverTime`
-- `POST /api/projects` — `409` when the name is already taken
-- `GET /api/projects/<id>` — returns `ETag` and an `etag` field on the project
-- `PUT /api/projects/<id>` — requires `If-Match`; `412` when the stored copy moved on, `409` on a name clash, `428` when omitted
-- `DELETE /api/projects/<id>` — requires `If-Match`, with the same `412`/`428` precondition behaviour
+### Private Cloud projects
 
-Any request body above `WEBMARS_USERS_MAX_CONTENT_LENGTH` (4 MB by default) is
-rejected with `413`.
+- `GET /api/projects?include=documents` — projects, documents, ETags and server
+  time for sync.
+- `POST /api/projects` — create; project names are unique per user without case
+  distinctions.
+- `GET /api/projects/<id>` — document plus `ETag`.
+- `PUT /api/projects/<id>` — requires `If-Match`; returns `412` for stale state,
+  `428` when the precondition is omitted.
+- `DELETE /api/projects/<id>` — same precondition contract.
 
-### Optimistic locking
+### Public Library
 
-Read a project, keep its `etag`, and send it back as `If-Match` on the next
-`PUT`. If another session saved in the meantime the write is refused with `412`
-and the response carries the current project so the caller can merge without a
-second round trip. Mutation without `If-Match` is rejected with `428`; this is
-intentional because silently falling back to last-writer-wins would reintroduce
-the data-loss path optimistic locking is meant to close.
+- `GET /api/publications?q=&limit=&offset=` — anonymous published listing.
+- `GET /api/publications/<slug>` — latest published/unlisted revision; short
+  cache lifetime.
+- `GET /api/publications/<slug>/revisions/<N>` — immutable pinned snapshot;
+  one-year immutable cache and readable after ordinary archive.
+- `GET /api/publications/mine?limit=&offset=` — paginated authenticated owner
+  listing, including `hasMore`.
+- `POST /api/publications` — claim permanent name and publish revision 1.
+- `POST /api/publications/<slug>/revisions` — add immutable revision.
+- `PUT /api/publications/<slug>` — edit latest metadata/visibility; the slug
+  cannot change.
+- `DELETE /api/publications/<slug>` — archive latest/listing without releasing
+  the name or deleting pinned revisions.
 
-### Configuration
+Publishing requires a verified email by default. Public snapshots support up to
+128 bounded text files by default (`.s`, `.asm`, `.mips`, `.c`, `.c0`, `.h`,
+`.h0`, `.txt`) and reject absolute/traversal/duplicate paths, NUL bytes and
+binary extensions.
+
+## Configuration reference
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
-| `SECRET_KEY` | *(none)* | Session signing key. Required in production. |
-| `WEBMARS_USERS_ENV` | *(none)* | Required: `development` or `production`. Startup refuses to guess. |
-| `WEBMARS_USERS_ALLOWED_ORIGINS` | *(empty)* | Extra comma-separated CORS origins. |
-| `WEBMARS_USERS_MAX_CONTENT_LENGTH` | `4194304` | Largest accepted request body, in bytes. |
-| `WEBMARS_USERS_LOGIN_MAX_ATTEMPTS` | `20` | Failed sign-ins per address before `429`. |
-| `WEBMARS_USERS_DATABASE_BUSY_TIMEOUT_MS` | `5000` | How long SQLite waits for a concurrent writer. |
+| `WEBMARS_USERS_ENV` | none | Required `development` or `production`. |
+| `SECRET_KEY` | development placeholder | Session signing; random in production. |
+| `BACKMARS_ACCOUNT_CODE_PEPPER` | session secret in development | Separate HMAC secret; required separately with production mail. |
+| `BACKMARS_DATABASE` | `data/app.db` | SQLite path; explicit absolute outside checkout in production. |
+| `WEBMARS_PUBLIC_URL` | `http://localhost:8080` | Installation URL used in transactional copy. |
+| `WEBMARS_USERS_ALLOWED_ORIGINS` | local dev origins | Comma-separated exact browser origins allowed to write. |
+| `WEBMARS_USERS_TRUSTED_PROXIES` | `0` | Trusted proxy hops used for client IP/proto. |
+| `SESSION_COOKIE_SECURE` | `1` in production | HTTPS-only session cookie. |
+| `SESSION_COOKIE_SAMESITE` | `Lax` | Use `None` only for genuine cross-site HTTPS. |
+| `WEBMARS_USERS_MAX_CONTENT_LENGTH` | `4194304` | Maximum HTTP request body. |
+| `WEBMARS_USERS_LOGIN_MAX_ATTEMPTS` | `20` | Failed logins per address/window. |
+| `WEBMARS_USERS_LOGIN_WINDOW_SECONDS` | `900` | Failed-login window. |
+| `BACKMARS_REGISTER_MAX_ATTEMPTS` | `20` | Registrations per address/window. |
+| `BACKMARS_REGISTER_WINDOW_SECONDS` | `3600` | Registration window. |
+| `BACKMARS_PASSWORD_MIN_LENGTH` | `8` | Minimum password characters. |
+| `BACKMARS_PASSWORD_MAX_LENGTH` | `1024` | Maximum password characters before hashing. |
+| `BACKMARS_USERNAME_MAX_LENGTH` | `64` | Maximum username characters. |
+| `BACKMARS_CODE_TTL_SECONDS` | `600` | Temporary code lifetime. |
+| `BACKMARS_CODE_MAX_ATTEMPTS` | `5` | Wrong attempts before invalidation. |
+| `BACKMARS_CODE_USER_LIMIT_PER_HOUR` | `5` | Code issues per account/purpose/hour. |
+| `BACKMARS_CODE_ADDRESS_LIMIT_PER_HOUR` | `20` | Code issues per address/purpose/hour. |
+| `BACKMARS_REQUIRE_VERIFIED_EMAIL_FOR_PUBLISH` | `1` | Gate public mutations on verified email. |
+| `BACKMARS_MAIL_ENABLED` | `0` | Enable transactional SMTP. |
+| `BACKMARS_MAIL_FROM` | empty | Envelope/display sender address. |
+| `BACKMARS_MAIL_FROM_NAME` | `webMARS` | Sender display name. |
+| `BACKMARS_SMTP_HOST` | empty | SMTP relay hostname. |
+| `BACKMARS_SMTP_PORT` | `587` | SMTP relay port. |
+| `BACKMARS_SMTP_SECURITY` | `starttls` | `starttls`, `ssl`/`tls`, or `none` outside production. |
+| `BACKMARS_SMTP_USERNAME` | empty | Optional SMTP login. |
+| `BACKMARS_SMTP_PASSWORD` | empty | SMTP/App Password; server secret. |
+| `BACKMARS_SMTP_TIMEOUT_SECONDS` | `15` | Network timeout. |
+| `BACKMARS_MAIL_SEND_ASYNC` | `1` in production | Queue delivery off the request path. |
+| `WEBMARS_USERS_DATABASE_BUSY_TIMEOUT_MS` | `5000` | SQLite writer wait. |
 
-Browser writes whose `Origin` is not in the allowlist are rejected with `403`,
-including requests from an untrusted sibling subdomain. Requests without an
-`Origin` remain available to command-line administration clients.
-| `WEBMARS_USERS_LOGIN_WINDOW_SECONDS` | `900` | Window the failures are counted over. |
-| `WEBMARS_USERS_TRUSTED_PROXIES` | `0` | Above zero, read the client address from `X-Forwarded-For`. |
-| `SESSION_COOKIE_SAMESITE` | `Lax` | Set to `None` (with `Secure`) if the API moves to another registrable domain. |
+Publication field/file limits use the `BACKMARS_PUBLICATION_*` variables in
+`config.py` and are listed in `backmars.env.example`. Keep the total public
+project limit at or below the matching webMARS local-project limit (1 MiB in
+the standard build), so every accepted publication can be opened by clients.
 
-Behind NGINX set `WEBMARS_USERS_TRUSTED_PROXIES=1`, otherwise every request
-looks like it comes from the proxy and the login rate limit applies to all
-clients at once.
+## Storage and migrations
 
-Project payload example:
+Startup replays the idempotent schema then applies additive migrations under a
+single SQLite write lock. v0.4 adds verification/session state, account codes,
+registration attempts, publications, revisions and immutable revision metadata.
+Existing users and Cloud projects are preserved.
 
-```json
-{
-  "name": "demo",
-  "project": {
-    "files": {
-      "main.asm": "...",
-      "utils.asm": "...",
-      "test.c": "..."
-    },
-    "activeFile": "main.asm",
-    "settings": {},
-    "updatedAt": "2026-03-15T12:00:00Z"
-  }
-}
-```
+SQLite runs with foreign keys, WAL, a busy timeout and `synchronous=NORMAL`.
+This improves concurrency but does not replace backups. Use SQLite's online
+`.backup` command or stop writes before copying all database state.
+
+## Repository layout
+
+- `app.py` — app factory, production guards, CORS and health.
+- `auth.py` — sessions, registration, reset and verification flows.
+- `projects.py` — private Cloud CRUD and optimistic locking.
+- `publications.py` — public metadata, sanitization and revision API.
+- `mailer.py` — provider-neutral SMTP transport and account messages.
+- `models.py` — SQLite data access and atomic account/publication operations.
+- `db.py` / `schema.sql` — connection policy and additive migrations.
+- `tests/` — account, session, project, publication, migration and security tests.

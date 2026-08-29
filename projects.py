@@ -71,6 +71,8 @@ def list_projects() -> tuple[object, int]:
 @login_required
 def create_project() -> tuple[object, int]:
     data = request.get_json(silent=True) or {}
+    if not isinstance(data, dict):
+        return json_error("A JSON object is required.")
     name = str(data.get("name", "")).strip() or "Untitled Project"
     raw_project = data.get("project", data.get("project_json"))
 
@@ -99,6 +101,8 @@ def read_project(project_id: int) -> tuple[object, int]:
 @login_required
 def update_project(project_id: int) -> tuple[object, int]:
     data = request.get_json(silent=True) or {}
+    if not isinstance(data, dict):
+        return json_error("A JSON object is required.")
     name = str(data.get("name", "")).strip() if "name" in data else None
     has_project_payload = "project" in data or "project_json" in data
     raw_project = data.get("project", data.get("project_json"))

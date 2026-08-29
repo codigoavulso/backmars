@@ -46,6 +46,20 @@ class ProjectSyncTestCase(unittest.TestCase):
 
 
 class OptimisticLockingTests(ProjectSyncTestCase):
+    def test_project_mutations_reject_non_object_json(self) -> None:
+        created = self.client.post("/api/projects", json=["project"])
+        project_id = self.create_project().get_json()["project"]["id"]
+        updated = self.client.put(
+            f"/api/projects/{project_id}",
+            json=["project"],
+            headers={"If-Match": "*"},
+        )
+
+        self.assertEqual(created.status_code, 400)
+        self.assertEqual(updated.status_code, 400)
+        self.assertEqual(created.get_json()["error"], "A JSON object is required.")
+        self.assertEqual(updated.get_json()["error"], "A JSON object is required.")
+
     def test_reading_a_project_returns_a_version_token(self) -> None:
         project_id = self.create_project().get_json()["project"]["id"]
 
@@ -279,12 +293,32 @@ class DuplicateNameMigrationTests(unittest.TestCase):
             rows = get_db().execute(
                 "SELECT name, updated_at FROM projects WHERE user_id = 1 ORDER BY updated_at DESC"
             ).fetchall()
+            user = get_db().execute(
+                "SELECT username, email, email_verified_at, session_version FROM users WHERE id = 1"
+            ).fetchone()
+            versions = {
+                row["version"]
+                for row in get_db().execute("SELECT version FROM schema_migrations").fetchall()
+            }
+            tables = {
+                row["name"]
+                for row in get_db().execute(
+                    "SELECT name FROM sqlite_master WHERE type = 'table'"
+                ).fetchall()
+            }
 
         self.assertEqual(len(rows), 3, "no project may be dropped by the migration")
         names = [row["name"] for row in rows]
         self.assertEqual(len(set(names)), 3, "every name must be unique after the migration")
         # The most recently updated row keeps the original name.
         self.assertEqual(names[0], "clash")
+        self.assertEqual((user["username"], user["email"]), ("a", "a@x"))
+        self.assertIsNone(user["email_verified_at"])
+        self.assertEqual(user["session_version"], 0)
+        self.assertTrue({4, 5}.issubset(versions))
+        self.assertTrue(
+            {"account_codes", "registration_attempts", "publications", "publication_revisions"}.issubset(tables)
+        )
 
     def test_the_migration_is_idempotent(self) -> None:
         self.seed_legacy_database()
