@@ -1,30 +1,27 @@
 from __future__ import annotations
 
+import re
+import secrets
 import sqlite3
 from concurrent.futures import ThreadPoolExecutor
 
 from flask import Blueprint, current_app, jsonify, request, session
 
 from mailer import mail_is_configured, send_account_code, send_password_changed_notice
-
 from models import (
+    account_code_digest,
     consume_account_code,
-    count_recent_registration_attempts,
-    count_recent_account_codes,
-    count_recent_failed_logins,
     create_account_code,
     create_user,
-    account_code_digest,
+    discard_login_attempt,
     generate_account_code,
     get_user_by_email,
     get_user_by_id,
-    get_user_session_version,
     get_user_by_username,
-    purge_expired_registration_attempts,
+    get_user_session_version,
     purge_old_account_codes,
-    purge_expired_login_attempts,
-    record_registration_attempt,
-    record_failed_login,
+    reserve_login_attempt,
+    reserve_registration_attempt,
     reset_password_with_account_code,
     update_user_password_hash,
     verify_email_with_account_code,
@@ -46,6 +43,10 @@ bp = Blueprint("auth", __name__)
 PASSWORD_RESET_PURPOSE = "password_reset"
 EMAIL_VERIFICATION_PURPOSE = "email_verification"
 _MAIL_EXECUTOR = ThreadPoolExecutor(max_workers=2, thread_name_prefix="backmars-mail")
+# Unknown users still traverse the same password verifier as known users.  The
+# random value is generated once per worker; it is not a credential and never
+# leaves process memory.
+_DUMMY_PASSWORD_HASH = hash_password(secrets.token_urlsafe(32))
 
 
 def establish_user_session(user_id: int, session_version: int | None = None) -> None:
@@ -60,8 +61,31 @@ def establish_user_session(user_id: int, session_version: int | None = None) -> 
 
 
 def _valid_email(email: str) -> bool:
-    local, separator, domain = email.partition("@")
-    return bool(local and separator and domain and "." in domain and len(email) <= 254)
+    if (
+        not email
+        or len(email) > 254
+        or email.count("@") != 1
+        or any(character.isspace() or ord(character) < 32 for character in email)
+    ):
+        return False
+    local, domain = email.rsplit("@", 1)
+    if not local or len(local.encode("utf-8")) > 64 or local.startswith(".") or local.endswith(".") or ".." in local:
+        return False
+    try:
+        ascii_domain = domain.encode("idna").decode("ascii")
+    except UnicodeError:
+        return False
+    if len(ascii_domain) > 253 or "." not in ascii_domain:
+        return False
+    labels = ascii_domain.split(".")
+    return all(
+        label
+        and len(label) <= 63
+        and not label.startswith("-")
+        and not label.endswith("-")
+        and re.fullmatch(r"[A-Za-z0-9-]+", label)
+        for label in labels
+    )
 
 
 def _password_error(password: str) -> str | None:
@@ -135,7 +159,13 @@ def _issue_account_code(user: dict[str, object], purpose: str, address: str) -> 
         account_code_digest(code, secret),
         ttl,
         address,
+        user_limit=max(1, int(current_app.config["ACCOUNT_CODE_USER_LIMIT_PER_HOUR"])),
+        address_limit=max(
+            1, int(current_app.config["ACCOUNT_CODE_ADDRESS_LIMIT_PER_HOUR"])
+        ),
     )
+    if code_id is None:
+        return False
     if current_app.config.get("MAIL_SEND_ASYNC"):
         app = current_app._get_current_object()
         try:
@@ -156,30 +186,22 @@ def _issue_account_code(user: dict[str, object], purpose: str, address: str) -> 
     return _send_account_code_and_invalidate_on_failure(code_id, user, code, purpose, ttl)
 
 
-def _code_request_is_limited(user_id: int, purpose: str, address: str) -> bool:
-    window = 3600
-    per_user = max(1, int(current_app.config["ACCOUNT_CODE_USER_LIMIT_PER_HOUR"]))
-    per_address = max(1, int(current_app.config["ACCOUNT_CODE_ADDRESS_LIMIT_PER_HOUR"]))
-    return (
-        count_recent_account_codes(
-            purpose=purpose, since_seconds=window, user_id=user_id
-        )
-        >= per_user
-        or count_recent_account_codes(
-            purpose=purpose, since_seconds=window, address=address
-        )
-        >= per_address
-    )
-
-
 @bp.post("/api/register")
 def register() -> tuple[object, int]:
     data = request.get_json(silent=True)
     if not isinstance(data, dict):
         return json_error("A JSON object is required.")
-    username = str(data.get("username", "")).strip()
-    email = str(data.get("email", "")).strip().lower()
-    password = str(data.get("password", ""))
+    raw_username = data.get("username", "")
+    raw_email = data.get("email", "")
+    raw_password = data.get("password", "")
+    if not all(
+        isinstance(value, str)
+        for value in (raw_username, raw_email, raw_password)
+    ):
+        return json_error("username, email and password must be text.")
+    username = raw_username.strip()
+    email = raw_email.strip().lower()
+    password = raw_password
 
     if not username or not email or not password:
         return json_error("username, email and password are required.")
@@ -197,12 +219,10 @@ def register() -> tuple[object, int]:
     address = client_address()
     window_seconds = max(60, int(current_app.config["REGISTER_ATTEMPT_WINDOW_SECONDS"]))
     maximum = max(1, int(current_app.config["REGISTER_MAX_ATTEMPTS"]))
-    purge_expired_registration_attempts(window_seconds)
-    if count_recent_registration_attempts(address, window_seconds) >= maximum:
+    if reserve_registration_attempt(address, window_seconds, maximum) is None:
         response, status = json_error("Too many registrations from this address. Try again later.", 429)
         response.headers["Retry-After"] = str(window_seconds)
         return response, status
-    record_registration_attempt(address)
 
     try:
         user = create_user(username, email, hash_password(password))
@@ -210,9 +230,7 @@ def register() -> tuple[object, int]:
         return json_error("Username or email already exists.", 409)
     establish_user_session(user["id"])
     verification_sent = False
-    if mail_is_configured() and not _code_request_is_limited(
-        int(user["id"]), EMAIL_VERIFICATION_PURPOSE, address
-    ):
+    if mail_is_configured():
         verification_sent = _issue_account_code(user, EMAIL_VERIFICATION_PURPOSE, address)
     return jsonify({"user": user, "verificationEmailSent": verification_sent}), 201
 
@@ -222,8 +240,12 @@ def login() -> tuple[object, int]:
     data = request.get_json(silent=True)
     if not isinstance(data, dict):
         return json_error("A JSON object is required.")
-    username = str(data.get("username", data.get("identifier", ""))).strip()
-    password = str(data.get("password", ""))
+    raw_username = data.get("username", data.get("identifier", ""))
+    raw_password = data.get("password", "")
+    if not isinstance(raw_username, str) or not isinstance(raw_password, str):
+        return json_error("Invalid credentials.", 401)
+    username = raw_username.strip()
+    password = raw_password
 
     if not username or not password:
         return json_error("username and password are required.")
@@ -232,18 +254,23 @@ def login() -> tuple[object, int]:
         return json_error("Invalid credentials.", 401)
 
     address = client_address()
-    window_seconds = int(current_app.config["LOGIN_ATTEMPT_WINDOW_SECONDS"])
-    max_attempts = int(current_app.config["LOGIN_MAX_ATTEMPTS"])
-    purge_expired_login_attempts(window_seconds)
-    if count_recent_failed_logins(address, window_seconds) >= max_attempts:
+    window_seconds = max(1, int(current_app.config["LOGIN_ATTEMPT_WINDOW_SECONDS"]))
+    max_attempts = max(1, int(current_app.config["LOGIN_MAX_ATTEMPTS"]))
+    attempt_id = reserve_login_attempt(address, window_seconds, max_attempts)
+    if attempt_id is None:
         response, status = json_error("Too many failed sign-in attempts. Try again later.", 429)
         response.headers["Retry-After"] = str(window_seconds)
         return response, status
 
     user = get_user_by_email(username.lower()) if "@" in username else get_user_by_username(username)
-    if not user or not verify_password(password, user["password_hash"]):
-        record_failed_login(address)
+    password_hash = user["password_hash"] if user else _DUMMY_PASSWORD_HASH
+    password_is_valid = verify_password(password, password_hash)
+    if not user or not password_is_valid:
         return json_error("Invalid credentials.", 401)
+    # The reservation protected the expensive verifier from a concurrent burst.
+    # A valid login is not a failed attempt, so remove only its own row; earlier
+    # failures from the same address remain and cannot be cleared by an attacker.
+    discard_login_attempt(attempt_id)
     if password_hash_needs_upgrade(user["password_hash"]):
         update_user_password_hash(user["id"], hash_password(password))
 
@@ -280,7 +307,10 @@ def request_password_reset() -> tuple[object, int]:
     data = request.get_json(silent=True)
     if not isinstance(data, dict):
         return json_error("A JSON object is required.")
-    email = str(data.get("email", "")).strip().lower()
+    raw_email = data.get("email", "")
+    if not isinstance(raw_email, str):
+        return json_error("A valid email address is required.", field="email")
+    email = raw_email.strip().lower()
     if not _valid_email(email):
         return json_error("A valid email address is required.", field="email")
 
@@ -293,7 +323,7 @@ def request_password_reset() -> tuple[object, int]:
     # Do the HMAC work even for unknown addresses, reducing the most obvious
     # timing difference without creating rows or sending mail to strangers.
     account_code_digest(generate_account_code(), str(current_app.config["ACCOUNT_CODE_PEPPER"]))
-    if user and not _code_request_is_limited(int(user["id"]), PASSWORD_RESET_PURPOSE, address):
+    if user:
         _issue_account_code(user, PASSWORD_RESET_PURPOSE, address)
     return jsonify(generic), 202
 
@@ -303,9 +333,17 @@ def confirm_password_reset() -> tuple[object, int]:
     data = request.get_json(silent=True)
     if not isinstance(data, dict):
         return json_error("A JSON object is required.")
-    email = str(data.get("email", "")).strip().lower()
-    code = str(data.get("code", "")).strip()
-    password = str(data.get("password", ""))
+    raw_email = data.get("email", "")
+    raw_code = data.get("code", "")
+    raw_password = data.get("password", "")
+    if not all(
+        isinstance(value, str)
+        for value in (raw_email, raw_code, raw_password)
+    ):
+        return json_error("The email address or temporary code is invalid.")
+    email = raw_email.strip().lower()
+    code = raw_code.strip()
+    password = raw_password
     if not _valid_email(email) or len(code) != 6 or not code.isdigit():
         return json_error("The email address or temporary code is invalid.")
     if password_error := _password_error(password):
@@ -346,8 +384,7 @@ def request_email_verification() -> tuple[object, int]:
     if user["emailVerified"]:
         return jsonify({"ok": True, "verified": True}), 200
     address = client_address()
-    if not _code_request_is_limited(int(user["id"]), EMAIL_VERIFICATION_PURPOSE, address):
-        _issue_account_code(user, EMAIL_VERIFICATION_PURPOSE, address)
+    _issue_account_code(user, EMAIL_VERIFICATION_PURPOSE, address)
     return jsonify({"ok": True, "verified": False}), 202
 
 
@@ -357,7 +394,10 @@ def confirm_email_verification() -> tuple[object, int]:
     data = request.get_json(silent=True)
     if not isinstance(data, dict):
         return json_error("A JSON object is required.")
-    code = str(data.get("code", "")).strip()
+    raw_code = data.get("code", "")
+    if not isinstance(raw_code, str):
+        return json_error("The temporary code is invalid or expired.")
+    code = raw_code.strip()
     user_id = current_user_id() or 0
     if len(code) != 6 or not code.isdigit():
         return json_error("The temporary code is invalid or expired.")

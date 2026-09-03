@@ -14,7 +14,14 @@ from models import (
     list_publications,
     update_publication_metadata,
 )
-from utils import coerce_project_document, current_user_id, json_error, login_required
+from utils import (
+    MAX_SQLITE_INTEGER,
+    coerce_project_document,
+    current_user_id,
+    json_error,
+    login_required,
+    valid_sqlite_id,
+)
 
 bp = Blueprint("publications", __name__)
 
@@ -34,7 +41,12 @@ SUPPORTED_FILE_EXTENSIONS = {".s", ".asm", ".mips", ".c", ".c0", ".h", ".h0", ".
 
 
 def _text(value: Any, *, maximum: int, field: str, required: bool = False) -> str:
-    result = str(value or "").strip()
+    if value is None:
+        result = ""
+    elif isinstance(value, str):
+        result = value.strip()
+    else:
+        raise ValueError(f"{field} must be text.")
     if required and not result:
         raise ValueError(f"{field} is required.")
     if len(result) > maximum:
@@ -110,7 +122,9 @@ def _normalize_metadata(data: dict[str, Any], existing: dict[str, Any] | None = 
 
 
 def _safe_public_path(value: Any) -> str:
-    raw = str(value or "").strip()
+    if not isinstance(value, str):
+        raise ValueError("Every public file path must be text.")
+    raw = value.strip()
     if not raw or raw.startswith(("/", "\\")) or DRIVE_PATH_PATTERN.match(raw):
         raise ValueError("Every public file must use a relative path.")
     if "\x00" in raw or any(ord(character) < 32 for character in raw):
@@ -146,7 +160,13 @@ def _coerce_public_project(payload: Any) -> dict[str, Any]:
         for entry in raw_files:
             if not isinstance(entry, dict):
                 raise ValueError("Every public file must be an object.")
-            entries.append((entry.get("path", entry.get("name")), entry.get("source", ""), str(entry.get("id", ""))))
+            entries.append(
+                (
+                    entry.get("path", entry.get("name")),
+                    entry.get("source", ""),
+                    entry.get("id", ""),
+                )
+            )
     else:
         raise ValueError("A public project must contain files.")
 
@@ -165,7 +185,9 @@ def _coerce_public_project(payload: Any) -> dict[str, Any]:
         if key in used_paths:
             raise ValueError("Public file paths must be unique without case distinctions.")
         used_paths.add(key)
-        text = str(raw_source or "")
+        if not isinstance(raw_source, str):
+            raise ValueError("Every public file source must be text.")
+        text = raw_source
         if "\x00" in text:
             raise ValueError("Public files must contain text, not NUL bytes.")
         byte_length = len(text.encode("utf-8"))
@@ -175,6 +197,8 @@ def _coerce_public_project(payload: Any) -> dict[str, Any]:
         if total_bytes > maximum_total_bytes:
             raise ValueError("The public project is too large.")
         files.append({"path": path, "source": text})
+        if file_id and not isinstance(file_id, str):
+            raise ValueError("Every public file id must be text.")
         if file_id:
             id_to_path[file_id] = path
 
@@ -226,26 +250,36 @@ def _verified_owner() -> tuple[dict[str, Any] | None, tuple[Any, int] | None]:
     return user, None
 
 
+def _list_window() -> tuple[int, int]:
+    maximum = max(1, int(current_app.config["PUBLICATION_LIST_LIMIT"]))
+    limit = min(maximum, max(1, int(request.args.get("limit", maximum))))
+    offset = max(0, int(request.args.get("offset", 0)))
+    if offset > MAX_SQLITE_INTEGER:
+        raise ValueError("offset is too large.")
+    return limit, offset
+
+
 @bp.get("/api/publications")
 def browse_publications() -> tuple[object, int]:
     query = str(request.args.get("q", "")).strip()
-    maximum = max(1, int(current_app.config["PUBLICATION_LIST_LIMIT"]))
     try:
-        limit = min(maximum, max(1, int(request.args.get("limit", maximum))))
-        offset = max(0, int(request.args.get("offset", 0)))
+        limit, offset = _list_window()
     except (TypeError, ValueError):
         return json_error("limit and offset must be integers.")
-    items = list_publications(query=query, limit=limit, offset=offset)
-    return jsonify({"publications": items, "limit": limit, "offset": offset}), 200
+    page = list_publications(query=query, limit=limit + 1, offset=offset)
+    return jsonify({
+        "publications": page[:limit],
+        "limit": limit,
+        "offset": offset,
+        "hasMore": len(page) > limit,
+    }), 200
 
 
 @bp.get("/api/publications/mine")
 @login_required
 def own_publications() -> tuple[object, int]:
-    maximum = max(1, int(current_app.config["PUBLICATION_LIST_LIMIT"]))
     try:
-        limit = min(maximum, max(1, int(request.args.get("limit", maximum))))
-        offset = max(0, int(request.args.get("offset", 0)))
+        limit, offset = _list_window()
     except (TypeError, ValueError):
         return json_error("limit and offset must be integers.")
     page = list_publications(
@@ -273,7 +307,7 @@ def read_publication(slug: str) -> tuple[object, int]:
 
 @bp.get("/api/publications/<slug>/revisions/<int:revision>")
 def read_publication_revision(slug: str, revision: int) -> tuple[object, int]:
-    if revision < 1:
+    if not valid_sqlite_id(revision):
         return json_error("Publication not found.", 404)
     publication = get_publication(slug, revision)
     if publication is None:
@@ -289,7 +323,7 @@ def publish() -> tuple[object, int]:
     user, error = _verified_owner()
     if error is not None:
         return error
-    data = request.get_json(silent=True) or {}
+    data = request.get_json(silent=True)
     if not isinstance(data, dict):
         return json_error("A JSON object is required.")
     try:
@@ -320,7 +354,7 @@ def publish_revision(slug: str) -> tuple[object, int]:
     user, error = _verified_owner()
     if error is not None:
         return error
-    data = request.get_json(silent=True) or {}
+    data = request.get_json(silent=True)
     if not isinstance(data, dict):
         return json_error("A JSON object is required.")
     try:
@@ -350,7 +384,7 @@ def edit_publication(slug: str) -> tuple[object, int]:
     if existing is None:
         # This deliberately does not reveal whether another user owns a private row.
         return json_error("Publication not found.", 404)
-    data = request.get_json(silent=True) or {}
+    data = request.get_json(silent=True)
     if not isinstance(data, dict):
         return json_error("A JSON object is required.")
     try:

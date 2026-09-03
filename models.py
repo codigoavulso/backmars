@@ -4,47 +4,15 @@ import hashlib
 import hmac
 import json
 import secrets
+from collections.abc import Callable
 from datetime import datetime, timedelta, timezone
-from typing import Any, Callable
+from typing import Any
 
 from db import get_db
 
 
 def utc_now() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
-
-
-def record_failed_login(client_address: str) -> None:
-    get_db().execute(
-        "INSERT INTO login_attempts (client_address, created_at) VALUES (?, ?)",
-        (client_address, utc_now()),
-    )
-    get_db().commit()
-
-
-def count_recent_failed_logins(client_address: str, window_seconds: int) -> int:
-    since = (
-        datetime.now(timezone.utc).replace(microsecond=0) - timedelta(seconds=window_seconds)
-    ).isoformat()
-    row = get_db().execute(
-        """
-        SELECT COUNT(*) AS total
-        FROM login_attempts
-        WHERE client_address = ? AND created_at >= ?
-        """,
-        (client_address, since),
-    ).fetchone()
-    return int(row["total"]) if row else 0
-
-
-def purge_expired_login_attempts(window_seconds: int) -> None:
-    # Housekeeping on the login path keeps the table from growing without bound
-    # without needing a scheduled job.
-    since = (
-        datetime.now(timezone.utc).replace(microsecond=0) - timedelta(seconds=window_seconds)
-    ).isoformat()
-    get_db().execute("DELETE FROM login_attempts WHERE created_at < ?", (since,))
-    get_db().commit()
 
 
 def _parse_project_json(payload: str) -> dict[str, Any]:
@@ -235,35 +203,70 @@ def update_project(
     return "updated", get_project(user_id, project_id)
 
 
-def record_registration_attempt(client_address: str) -> None:
-    get_db().execute(
-        "INSERT INTO registration_attempts (client_address, created_at) VALUES (?, ?)",
-        (client_address, utc_now()),
+def _reserve_address_attempt(
+    table: str,
+    client_address: str,
+    window_seconds: int,
+    maximum: int,
+) -> int | None:
+    """Atomically reserve one rate-limit slot and return its row id.
+
+    Counting and recording in separate transactions lets a concurrent burst
+    pass the same old count before any request records itself.  A short
+    immediate transaction serializes only this inexpensive bookkeeping; the
+    password hasher and the rest of the request run after the lock is released.
+    """
+    statements = {
+        "login_attempts": (
+            "DELETE FROM login_attempts WHERE created_at < ?",
+            "SELECT COUNT(*) AS total FROM login_attempts WHERE client_address = ? AND created_at >= ?",
+            "INSERT INTO login_attempts (client_address, created_at) VALUES (?, ?)",
+        ),
+        "registration_attempts": (
+            "DELETE FROM registration_attempts WHERE created_at < ?",
+            "SELECT COUNT(*) AS total FROM registration_attempts WHERE client_address = ? AND created_at >= ?",
+            "INSERT INTO registration_attempts (client_address, created_at) VALUES (?, ?)",
+        ),
+    }
+    if table not in statements:
+        raise ValueError("Unknown attempt table.")
+    delete_sql, count_sql, insert_sql = statements[table]
+    now = datetime.now(timezone.utc).replace(microsecond=0)
+    now_text = now.isoformat()
+    since = (now - timedelta(seconds=max(1, int(window_seconds)))).isoformat()
+    connection = get_db()
+    connection.execute("BEGIN IMMEDIATE")
+    try:
+        connection.execute(delete_sql, (since,))
+        row = connection.execute(count_sql, (client_address, since)).fetchone()
+        if int(row["total"] if row else 0) >= max(1, int(maximum)):
+            connection.commit()
+            return None
+        cursor = connection.execute(insert_sql, (client_address, now_text))
+        connection.commit()
+        return int(cursor.lastrowid)
+    except Exception:
+        connection.rollback()
+        raise
+
+
+def reserve_login_attempt(client_address: str, window_seconds: int, maximum: int) -> int | None:
+    return _reserve_address_attempt(
+        "login_attempts", client_address, window_seconds, maximum
     )
+
+
+def discard_login_attempt(attempt_id: int) -> None:
+    get_db().execute("DELETE FROM login_attempts WHERE id = ?", (attempt_id,))
     get_db().commit()
 
 
-def count_recent_registration_attempts(client_address: str, window_seconds: int) -> int:
-    since = (
-        datetime.now(timezone.utc).replace(microsecond=0) - timedelta(seconds=window_seconds)
-    ).isoformat()
-    row = get_db().execute(
-        """
-        SELECT COUNT(*) AS total
-        FROM registration_attempts
-        WHERE client_address = ? AND created_at >= ?
-        """,
-        (client_address, since),
-    ).fetchone()
-    return int(row["total"]) if row else 0
-
-
-def purge_expired_registration_attempts(window_seconds: int) -> None:
-    since = (
-        datetime.now(timezone.utc).replace(microsecond=0) - timedelta(seconds=window_seconds)
-    ).isoformat()
-    get_db().execute("DELETE FROM registration_attempts WHERE created_at < ?", (since,))
-    get_db().commit()
+def reserve_registration_attempt(
+    client_address: str, window_seconds: int, maximum: int
+) -> int | None:
+    return _reserve_address_attempt(
+        "registration_attempts", client_address, window_seconds, maximum
+    )
 
 
 def get_user_session_version(user_id: int) -> int | None:
@@ -308,51 +311,75 @@ def account_code_digest(code: str, secret: str) -> str:
     ).hexdigest()
 
 
-def count_recent_account_codes(*, purpose: str, since_seconds: int, user_id: int | None = None, address: str | None = None) -> int:
-    since = (
-        datetime.now(timezone.utc).replace(microsecond=0) - timedelta(seconds=since_seconds)
-    ).isoformat()
-    clauses = ["purpose = ?", "created_at >= ?"]
-    values: list[Any] = [purpose, since]
-    if user_id is not None:
-        clauses.append("user_id = ?")
-        values.append(user_id)
-    if address is not None:
-        clauses.append("request_address = ?")
-        values.append(address)
-    row = get_db().execute(
-        f"SELECT COUNT(*) AS total FROM account_codes WHERE {' AND '.join(clauses)}",
-        values,
-    ).fetchone()
-    return int(row["total"]) if row else 0
-
-
-def create_account_code(user_id: int, purpose: str, code_hash: str, ttl_seconds: int, address: str) -> int:
+def create_account_code(
+    user_id: int,
+    purpose: str,
+    code_hash: str,
+    ttl_seconds: int,
+    address: str,
+    *,
+    user_limit: int | None = None,
+    address_limit: int | None = None,
+    window_seconds: int = 3600,
+) -> int | None:
     now = datetime.now(timezone.utc).replace(microsecond=0)
-    get_db().execute(
-        """
-        UPDATE account_codes SET consumed_at = ?
-        WHERE user_id = ? AND purpose = ? AND consumed_at IS NULL
-        """,
-        (now.isoformat(), user_id, purpose),
-    )
-    cursor = get_db().execute(
-        """
-        INSERT INTO account_codes
-            (user_id, purpose, code_hash, expires_at, attempts, created_at, consumed_at, request_address)
-        VALUES (?, ?, ?, ?, 0, ?, NULL, ?)
-        """,
-        (
-            user_id,
-            purpose,
-            code_hash,
-            (now + timedelta(seconds=ttl_seconds)).isoformat(),
-            now.isoformat(),
-            address,
-        ),
-    )
-    get_db().commit()
-    return int(cursor.lastrowid)
+    now_text = now.isoformat()
+    connection = get_db()
+    connection.execute("BEGIN IMMEDIATE")
+    try:
+        if user_limit is not None or address_limit is not None:
+            since = (
+                now - timedelta(seconds=max(1, int(window_seconds)))
+            ).isoformat()
+            if user_limit is not None:
+                row = connection.execute(
+                    """
+                    SELECT COUNT(*) AS total FROM account_codes
+                    WHERE user_id = ? AND purpose = ? AND created_at >= ?
+                    """,
+                    (user_id, purpose, since),
+                ).fetchone()
+                if int(row["total"] if row else 0) >= max(1, int(user_limit)):
+                    connection.commit()
+                    return None
+            if address_limit is not None:
+                row = connection.execute(
+                    """
+                    SELECT COUNT(*) AS total FROM account_codes
+                    WHERE request_address = ? AND purpose = ? AND created_at >= ?
+                    """,
+                    (address, purpose, since),
+                ).fetchone()
+                if int(row["total"] if row else 0) >= max(1, int(address_limit)):
+                    connection.commit()
+                    return None
+        connection.execute(
+            """
+            UPDATE account_codes SET consumed_at = ?
+            WHERE user_id = ? AND purpose = ? AND consumed_at IS NULL
+            """,
+            (now_text, user_id, purpose),
+        )
+        cursor = connection.execute(
+            """
+            INSERT INTO account_codes
+                (user_id, purpose, code_hash, expires_at, attempts, created_at, consumed_at, request_address)
+            VALUES (?, ?, ?, ?, 0, ?, NULL, ?)
+            """,
+            (
+                user_id,
+                purpose,
+                code_hash,
+                (now + timedelta(seconds=ttl_seconds)).isoformat(),
+                now_text,
+                address,
+            ),
+        )
+        connection.commit()
+        return int(cursor.lastrowid)
+    except Exception:
+        connection.rollback()
+        raise
 
 
 def consume_account_code(code_id: int) -> None:

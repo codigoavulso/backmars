@@ -69,6 +69,30 @@ class PasswordRecoveryTests(unittest.TestCase):
         self.assertEqual(unknown.status_code, 202)
         self.assertEqual(existing.get_json(), unknown.get_json())
 
+    def test_code_requests_are_limited_without_invalidating_the_latest_code(self) -> None:
+        codes = []
+        for _ in range(6):
+            response = self.client.post(
+                "/api/password-reset/request", json={"email": "recover@example.com"}
+            )
+            self.assertEqual(response.status_code, 202)
+            if len(self.messages) > len(codes):
+                match = re.search(r"\b(\d{6})\b", self.messages[-1]["text"])
+                self.assertIsNotNone(match)
+                codes.append(match.group(1))
+
+        self.assertEqual(len(self.messages), 5)
+        self.assertEqual(len(codes), 5)
+        confirmed = self.client.post(
+            "/api/password-reset/confirm",
+            json={
+                "email": "recover@example.com",
+                "code": codes[-1],
+                "password": "new secure password",
+            },
+        )
+        self.assertEqual(confirmed.status_code, 200)
+
     def test_only_a_digest_is_stored_and_the_code_is_one_use(self) -> None:
         code = self.request_code()
         with self.app.app_context():
@@ -184,6 +208,21 @@ class PasswordRecoveryTests(unittest.TestCase):
                 "/api/password-reset/request", json={"email": "someone@example.com"}
             )
         self.assertEqual(response.status_code, 503)
+
+    def test_recovery_fields_must_be_text(self) -> None:
+        requested = self.client.post(
+            "/api/password-reset/request", json={"email": ["recover@example.com"]}
+        )
+        confirmed = self.client.post(
+            "/api/password-reset/confirm",
+            json={
+                "email": "recover@example.com",
+                "code": ["123456"],
+                "password": "new secure password",
+            },
+        )
+        self.assertEqual(requested.status_code, 400)
+        self.assertEqual(confirmed.status_code, 400)
 
 
 if __name__ == "__main__":

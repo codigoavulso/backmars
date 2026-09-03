@@ -60,6 +60,45 @@ class OptimisticLockingTests(ProjectSyncTestCase):
         self.assertEqual(created.get_json()["error"], "A JSON object is required.")
         self.assertEqual(updated.get_json()["error"], "A JSON object is required.")
 
+    def test_empty_json_scalars_and_missing_json_cannot_create_projects(self) -> None:
+        for payload in (None, False, 0, "", []):
+            with self.subTest(payload=payload):
+                response = self.client.post("/api/projects", json=payload)
+                self.assertEqual(response.status_code, 400)
+                self.assertEqual(response.get_json()["error"], "A JSON object is required.")
+
+        missing = self.client.post("/api/projects")
+        self.assertEqual(missing.status_code, 400)
+        self.assertEqual(self.client.get("/api/projects").get_json()["projects"], [])
+
+    def test_project_names_are_bounded_text(self) -> None:
+        for invalid_name in (["array"], {"object": True}, 7, "x" * 121):
+            with self.subTest(name=invalid_name):
+                response = self.client.post(
+                    "/api/projects",
+                    json={"name": invalid_name, "project": {"files": {}}},
+                )
+                self.assertEqual(response.status_code, 400)
+                self.assertEqual(response.get_json()["field"], "name")
+
+    def test_oversized_sqlite_ids_are_clean_not_found_responses(self) -> None:
+        huge_id = "9" * 200
+        self.assertEqual(self.client.get(f"/api/projects/{huge_id}").status_code, 404)
+        self.assertEqual(
+            self.client.put(
+                f"/api/projects/{huge_id}",
+                json={"name": "safe"},
+                headers={"If-Match": "*"},
+            ).status_code,
+            404,
+        )
+        self.assertEqual(
+            self.client.delete(
+                f"/api/projects/{huge_id}", headers={"If-Match": "*"}
+            ).status_code,
+            404,
+        )
+
     def test_reading_a_project_returns_a_version_token(self) -> None:
         project_id = self.create_project().get_json()["project"]["id"]
 

@@ -58,14 +58,15 @@ BackMars refuses to start when a production configuration would be unsafe or
 non-functional. In production:
 
 - `WEBMARS_USERS_ENV=production` is mandatory.
-- `SECRET_KEY` must not be the public development placeholder.
+- `SECRET_KEY` must be an unpredictable value of at least 32 bytes, not the
+  public development placeholder.
 - `BACKMARS_DATABASE` must be an absolute path outside the code checkout.
 - If verified email is required for publishing, transactional mail must work.
 - SMTP security must be `starttls`, `ssl`/`tls`, or explicit `none`; production
   refuses `none`.
 - Authenticated SMTP without TLS is refused in every environment.
 - When mail is enabled, the account-code pepper must be independent of the
-  session secret.
+  session secret and contain at least 32 bytes.
 
 Use `backmars.env.example` as a field reference and follow
 [`DEPLOYMENT.md`](DEPLOYMENT.md). Never commit real credentials.
@@ -122,8 +123,8 @@ binary extensions.
 | Variable | Default | Purpose |
 | --- | --- | --- |
 | `WEBMARS_USERS_ENV` | none | Required `development` or `production`. |
-| `SECRET_KEY` | development placeholder | Session signing; random in production. |
-| `BACKMARS_ACCOUNT_CODE_PEPPER` | session secret in development | Separate HMAC secret; required separately with production mail. |
+| `SECRET_KEY` | development placeholder | Session signing; unpredictable and at least 32 bytes in production. |
+| `BACKMARS_ACCOUNT_CODE_PEPPER` | session secret in development | Separate HMAC secret of at least 32 bytes; required separately with production mail. |
 | `BACKMARS_DATABASE` | `data/app.db` | SQLite path; explicit absolute outside checkout in production. |
 | `WEBMARS_PUBLIC_URL` | `http://localhost:8080` | Installation URL used in transactional copy. |
 | `WEBMARS_USERS_ALLOWED_ORIGINS` | local dev origins | Comma-separated exact browser origins allowed to write. |
@@ -138,6 +139,7 @@ binary extensions.
 | `BACKMARS_PASSWORD_MIN_LENGTH` | `8` | Minimum password characters. |
 | `BACKMARS_PASSWORD_MAX_LENGTH` | `1024` | Maximum password characters before hashing. |
 | `BACKMARS_USERNAME_MAX_LENGTH` | `64` | Maximum username characters. |
+| `BACKMARS_PROJECT_MAX_NAME_LENGTH` | `120` | Maximum private project-name characters. |
 | `BACKMARS_CODE_TTL_SECONDS` | `600` | Temporary code lifetime. |
 | `BACKMARS_CODE_MAX_ATTEMPTS` | `5` | Wrong attempts before invalidation. |
 | `BACKMARS_CODE_USER_LIMIT_PER_HOUR` | `5` | Code issues per account/purpose/hour. |

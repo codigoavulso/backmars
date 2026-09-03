@@ -35,7 +35,7 @@ class SecretKeyGuardTests(unittest.TestCase):
             with mock.patch.dict(os.environ, {"WEBMARS_USERS_ENV": "production"}):
                 app = create_app(
                     {
-                        "SECRET_KEY": "a-real-production-secret",
+                        "SECRET_KEY": "a-real-production-secret-with-32-bytes",
                         "DATABASE": Path(directory) / "test.db",
                         "REQUIRE_VERIFIED_EMAIL_FOR_PUBLISH": False,
                     }
@@ -49,7 +49,7 @@ class SecretKeyGuardTests(unittest.TestCase):
                 with self.assertRaises(RuntimeError) as raised:
                     create_app(
                         {
-                            "SECRET_KEY": "a-real-production-secret",
+                            "SECRET_KEY": "a-real-production-secret-with-32-bytes",
                             "DATABASE": Path(directory) / "test.db",
                             "MAIL_ENABLED": False,
                             "REQUIRE_VERIFIED_EMAIL_FOR_PUBLISH": True,
@@ -57,6 +57,38 @@ class SecretKeyGuardTests(unittest.TestCase):
                     )
 
         self.assertIn("verification", str(raised.exception).lower())
+
+    def test_production_refuses_a_short_or_missing_secret(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            with mock.patch.dict(os.environ, {"WEBMARS_USERS_ENV": "production"}):
+                for weak_secret in (None, "x", "predictable-but-still-too-short"):
+                    with self.subTest(secret=weak_secret):
+                        with self.assertRaises(RuntimeError) as raised:
+                            create_app(
+                                {
+                                    "SECRET_KEY": weak_secret,
+                                    "DATABASE": Path(directory) / "test.db",
+                                    "REQUIRE_VERIFIED_EMAIL_FOR_PUBLISH": False,
+                                }
+                            )
+                        self.assertIn("at least 32", str(raised.exception))
+
+    def test_production_refuses_a_weak_pepper_with_a_custom_mail_transport(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            with mock.patch.dict(os.environ, {"WEBMARS_USERS_ENV": "production"}):
+                with self.assertRaises(RuntimeError) as raised:
+                    create_app(
+                        {
+                            "SECRET_KEY": "a-real-production-secret-with-32-bytes",
+                            "DATABASE": Path(directory) / "test.db",
+                            "MAIL_SEND_FUNCTION": lambda **_: None,
+                            "ACCOUNT_CODE_PEPPER": "short",
+                            "ACCOUNT_CODE_PEPPER_IS_SEPARATE": True,
+                            "REQUIRE_VERIFIED_EMAIL_FOR_PUBLISH": False,
+                        }
+                    )
+        self.assertIn("pepper", str(raised.exception).lower())
+        self.assertIn("at least 32", str(raised.exception))
 
     def test_development_still_starts_but_warns(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -197,6 +229,19 @@ class RegistrationGuardTests(ServiceTestCase):
         malformed = self.client.post("/api/register", json=["not", "an", "object"])
         self.assertEqual(oversized.status_code, 400)
         self.assertEqual(malformed.status_code, 400)
+
+        for field in ("username", "email", "password"):
+            payload = {
+                "username": "typed-user",
+                "email": "typed@example.com",
+                "password": "short enough",
+            }
+            payload[field] = ["not", "text"]
+            with self.subTest(field=field):
+                self.assertEqual(
+                    self.client.post("/api/register", json=payload).status_code,
+                    400,
+                )
 
 
 class RequestSizeLimitTests(ServiceTestCase):

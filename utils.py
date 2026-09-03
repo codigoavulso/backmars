@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
 from functools import wraps
-from typing import Any, Callable
+from typing import Any
 
 import bcrypt
 from flask import jsonify, request, session
@@ -10,6 +11,7 @@ from werkzeug.security import check_password_hash, generate_password_hash
 
 PREFERRED_PASSWORD_METHOD = "scrypt"
 LEGACY_BCRYPT_PREFIXES = ("$2a$", "$2b$", "$2y$")
+MAX_SQLITE_INTEGER = (1 << 63) - 1
 
 
 def hash_password(password: str) -> str:
@@ -77,6 +79,11 @@ def client_address() -> str:
     # ProxyFix has already rewritten remote_addr when a trusted proxy count is
     # configured, so reading X-Forwarded-For here would only add a spoofable path.
     return str(request.remote_addr or "unknown")
+
+
+def valid_sqlite_id(value: int) -> bool:
+    """Return whether an URL integer can be bound to SQLite safely."""
+    return 1 <= int(value) <= MAX_SQLITE_INTEGER
 
 
 def json_error(message: str, status: int = 400, **extra: Any) -> tuple[Any, int]:

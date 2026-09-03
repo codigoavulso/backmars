@@ -84,6 +84,41 @@ class PublicationTests(unittest.TestCase):
         self.assertEqual(publication["author"], {"username": "alice"})
         self.assertNotIn("email", str(publication).lower())
 
+    def test_public_listing_reports_an_exact_next_page(self) -> None:
+        self.assertEqual(self.publish().status_code, 201)
+        self.assertEqual(self.publish(slug="second-exercise").status_code, 201)
+
+        first = self.client.get("/api/publications?limit=1&offset=0").get_json()
+        second = self.client.get("/api/publications?limit=1&offset=1").get_json()
+
+        self.assertEqual(len(first["publications"]), 1)
+        self.assertEqual(len(second["publications"]), 1)
+        self.assertTrue(first["hasMore"])
+        self.assertFalse(second["hasMore"])
+
+    def test_publication_fields_refuse_implicit_object_to_string_coercion(self) -> None:
+        invalid_title = self.payload(slug="invalid-title")
+        invalid_title["title"] = {"unexpected": "object"}
+        invalid_source = self.payload(slug="invalid-source")
+        invalid_source["project"] = {"files": {"main.asm": ["not", "text"]}}
+
+        self.assertEqual(
+            self.client.post("/api/publications", json=invalid_title).status_code,
+            400,
+        )
+        self.assertEqual(
+            self.client.post("/api/publications", json=invalid_source).status_code,
+            400,
+        )
+
+    def test_oversized_revision_ids_are_clean_not_found_responses(self) -> None:
+        self.assertEqual(self.publish().status_code, 201)
+        huge_revision = "9" * 200
+        response = self.client.get(
+            f"/api/publications/first-exercise/revisions/{huge_revision}"
+        )
+        self.assertEqual(response.status_code, 404)
+
     def test_webmars_public_interchange_array_is_accepted_for_create_and_revision(self) -> None:
         payload = self.payload(slug="browser-format")
         payload["project"] = {

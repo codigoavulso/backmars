@@ -10,11 +10,24 @@ from werkzeug.middleware.proxy_fix import ProxyFix
 
 from auth import bp as auth_bp
 from config import BASE_DIR, DEV_SECRET_KEY, DevelopmentConfig, ProductionConfig
-from db import ensure_database, init_app as init_db_app
+from db import ensure_database
+from db import init_app as init_db_app
 from mailer import mail_is_configured
 from projects import bp as projects_bp
 from publications import bp as publications_bp
 from version import APP_VERSION
+
+MIN_PRODUCTION_SECRET_BYTES = 32
+
+
+def _secret_has_minimum_strength(value: object) -> bool:
+    if isinstance(value, bytes):
+        encoded = value
+    elif isinstance(value, str):
+        encoded = value.encode("utf-8")
+    else:
+        return False
+    return len(encoded) >= MIN_PRODUCTION_SECRET_BYTES
 
 
 def allowed_origins() -> set[str]:
@@ -62,7 +75,12 @@ def create_app(config_overrides: dict[str, Any] | None = None) -> Flask:
             "SECRET_KEY is the development placeholder; sessions are forgeable. "
             "Never run this configuration outside a local machine."
         )
-    if app.config.get("MAIL_ENABLED"):
+    if is_production and not _secret_has_minimum_strength(app.config.get("SECRET_KEY")):
+        raise RuntimeError(
+            f"SECRET_KEY must contain at least {MIN_PRODUCTION_SECRET_BYTES} bytes in production."
+        )
+    mail_enabled = bool(app.config.get("MAIL_ENABLED"))
+    if mail_enabled:
         if not app.config.get("MAIL_FROM") or not app.config.get("SMTP_HOST"):
             raise RuntimeError(
                 "Transactional mail is enabled but BACKMARS_MAIL_FROM or "
@@ -79,9 +97,23 @@ def create_app(config_overrides: dict[str, Any] | None = None) -> Flask:
             )
         if is_production and security == "none":
             raise RuntimeError("Production transactional mail must use TLS.")
-        if is_production and not app.config.get("ACCOUNT_CODE_PEPPER_IS_SEPARATE"):
+    mail_configured = bool(
+        callable(app.config.get("MAIL_SEND_FUNCTION"))
+        or (
+            mail_enabled
+            and app.config.get("MAIL_FROM")
+            and app.config.get("SMTP_HOST")
+        )
+    )
+    if is_production and mail_configured:
+        if not app.config.get("ACCOUNT_CODE_PEPPER_IS_SEPARATE"):
             raise RuntimeError(
                 "BACKMARS_ACCOUNT_CODE_PEPPER must be a separate random secret in production."
+            )
+        if not _secret_has_minimum_strength(app.config.get("ACCOUNT_CODE_PEPPER")):
+            raise RuntimeError(
+                "BACKMARS_ACCOUNT_CODE_PEPPER must contain at least "
+                f"{MIN_PRODUCTION_SECRET_BYTES} bytes in production."
             )
     if is_production:
         database_path = Path(app.config["DATABASE"]).expanduser()
@@ -89,14 +121,6 @@ def create_app(config_overrides: dict[str, Any] | None = None) -> Flask:
             raise RuntimeError(
                 "Production DATABASE must be an absolute path outside the BackMars code checkout."
             )
-        mail_configured = bool(
-            callable(app.config.get("MAIL_SEND_FUNCTION"))
-            or (
-                app.config.get("MAIL_ENABLED")
-                and app.config.get("MAIL_FROM")
-                and app.config.get("SMTP_HOST")
-            )
-        )
         if app.config.get("REQUIRE_VERIFIED_EMAIL_FOR_PUBLISH") and not mail_configured:
             raise RuntimeError(
                 "Email verification is required for publishing, but transactional mail is disabled. "

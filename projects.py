@@ -2,21 +2,49 @@ from __future__ import annotations
 
 import sqlite3
 
-from flask import Blueprint, jsonify, request
+from flask import Blueprint, current_app, jsonify, request
 
 from models import (
     create_project as create_project_record,
+)
+from models import (
     delete_project as delete_project_record,
+)
+from models import (
     get_project,
     list_projects_for_user,
-    update_project as update_project_record,
     utc_now,
 )
-from utils import coerce_project_document, current_user_id, json_error, login_required
+from models import (
+    update_project as update_project_record,
+)
+from utils import (
+    coerce_project_document,
+    current_user_id,
+    json_error,
+    login_required,
+    valid_sqlite_id,
+)
 
 bp = Blueprint("projects", __name__)
 
 DUPLICATE_NAME_MESSAGE = "A project with that name already exists."
+
+
+def _project_name(value: object, *, default: str | None = None) -> str:
+    if value is None and default is not None:
+        return default
+    if not isinstance(value, str):
+        raise ValueError("Project name must be text.")
+    name = value.strip()
+    if not name:
+        if default is not None:
+            return default
+        raise ValueError("Project name cannot be empty.")
+    maximum = max(1, int(current_app.config["PROJECT_MAX_NAME_LENGTH"]))
+    if len(name) > maximum:
+        raise ValueError(f"Project name must contain at most {maximum} characters.")
+    return name
 
 
 def _with_etag(payload: dict[str, object], status: int):
@@ -70,10 +98,13 @@ def list_projects() -> tuple[object, int]:
 @bp.post("/api/projects")
 @login_required
 def create_project() -> tuple[object, int]:
-    data = request.get_json(silent=True) or {}
+    data = request.get_json(silent=True)
     if not isinstance(data, dict):
         return json_error("A JSON object is required.")
-    name = str(data.get("name", "")).strip() or "Untitled Project"
+    try:
+        name = _project_name(data.get("name"), default="Untitled Project")
+    except ValueError as exc:
+        return json_error(str(exc), field="name")
     raw_project = data.get("project", data.get("project_json"))
 
     try:
@@ -91,6 +122,8 @@ def create_project() -> tuple[object, int]:
 @bp.get("/api/projects/<int:project_id>")
 @login_required
 def read_project(project_id: int) -> tuple[object, int]:
+    if not valid_sqlite_id(project_id):
+        return json_error("Project not found.", 404)
     project = get_project(current_user_id() or 0, project_id)
     if project is None:
         return json_error("Project not found.", 404)
@@ -100,10 +133,15 @@ def read_project(project_id: int) -> tuple[object, int]:
 @bp.put("/api/projects/<int:project_id>")
 @login_required
 def update_project(project_id: int) -> tuple[object, int]:
-    data = request.get_json(silent=True) or {}
+    if not valid_sqlite_id(project_id):
+        return json_error("Project not found.", 404)
+    data = request.get_json(silent=True)
     if not isinstance(data, dict):
         return json_error("A JSON object is required.")
-    name = str(data.get("name", "")).strip() if "name" in data else None
+    try:
+        name = _project_name(data.get("name")) if "name" in data else None
+    except ValueError as exc:
+        return json_error(str(exc), field="name")
     has_project_payload = "project" in data or "project_json" in data
     raw_project = data.get("project", data.get("project_json"))
 
@@ -112,8 +150,6 @@ def update_project(project_id: int) -> tuple[object, int]:
     except ValueError as exc:
         return json_error(str(exc))
 
-    if name == "":
-        return json_error("Project name cannot be empty.")
     if name is None and project is None:
         return json_error("Nothing to update.")
 
@@ -142,6 +178,8 @@ def update_project(project_id: int) -> tuple[object, int]:
 @bp.delete("/api/projects/<int:project_id>")
 @login_required
 def delete_project(project_id: int) -> tuple[object, int]:
+    if not valid_sqlite_id(project_id):
+        return json_error("Project not found.", 404)
     expected_etag = _requested_etag()
     if expected_etag is None:
         return json_error("If-Match is required when deleting a project.", 428, code="precondition_required")
