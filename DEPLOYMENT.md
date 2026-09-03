@@ -1,4 +1,4 @@
-# BackMars v0.4.0 deployment and upgrade checklist
+# BackMars v0.4.1 deployment and upgrade checklist
 
 This procedure assumes Nginx → Gunicorn → Flask on Linux. Adapt paths and the
 service account, but keep the security boundaries.
@@ -23,8 +23,8 @@ operation so WAL state is included:
 
 ```bash
 sudo -u backmars sqlite3 /var/lib/backmars/app.db \
-  ".backup '/var/lib/backmars/backups/pre-0.4.0.db'"
-sudo chmod 600 /var/lib/backmars/backups/pre-0.4.0.db
+  ".backup '/var/lib/backmars/backups/pre-0.4.1.db'"
+sudo chmod 600 /var/lib/backmars/backups/pre-0.4.1.db
 ```
 
 Test the backup with `PRAGMA integrity_check;` and record its checksum outside
@@ -89,7 +89,7 @@ Do not expose Gunicorn directly or trust arbitrary `X-Forwarded-For` headers.
 
 Use a dedicated test account and project:
 
-1. `GET /api/health` reports `version: 0.4.0` and `mailConfigured: true`.
+1. `GET /api/health` reports `version: 0.4.1` and `mailConfigured: true`.
 2. Registration queues one verification message; confirm the six-digit code.
 3. Login works by username and email and sets Secure, HttpOnly session cookie.
 4. Request password reset, use the code once, confirm the old password fails and

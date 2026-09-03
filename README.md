@@ -1,4 +1,4 @@
-# BackMars v0.4.0
+# BackMars v0.4.1
 
 BackMars is the optional, self-hostable service for webMARS accounts, private
 Cloud projects, email-based account recovery and the per-installation Public
@@ -8,6 +8,23 @@ vendor-specific mail dependency: any standards-compliant SMTP relay works.
 The webMARS assembler, simulator, tools and local project storage do not depend
 on BackMars. Each university or teacher may operate an independent instance;
 accounts and first-come public names belong only to that instance.
+
+## v0.4.1
+
+- Made login, registration and temporary-code rate limits atomic so concurrent
+  requests cannot all pass the same stale count.
+- Kept previous failed-login rows after a valid sign-in and used a dummy
+  password verifier for unknown accounts to reduce timing-based enumeration.
+- Required independent production secrets of at least 32 bytes whenever
+  transactional mail is available, including custom mail transports.
+- Rejected non-text account, project, publication and public-file fields rather
+  than silently converting arrays or objects into strings.
+- Added bounded project names, stricter email/domain validation and safe
+  handling for integer URL values beyond SQLite's supported range.
+- Added an exact <code>hasMore</code> result to anonymous Public Library pages,
+  matching the existing owner-list contract.
+
+See [`CHANGELOG.md`](CHANGELOG.md) for the release history.
 
 ## v0.4.0
 
