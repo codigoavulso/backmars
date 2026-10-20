@@ -1,4 +1,4 @@
-# BackMars v0.4.1
+# BackMars v0.5.0
 
 BackMars is the optional, self-hostable service for webMARS accounts, private
 Cloud projects, email-based account recovery and the per-installation Public
@@ -8,6 +8,13 @@ vendor-specific mail dependency: any standards-compliant SMTP relay works.
 The webMARS assembler, simulator, tools and local project storage do not depend
 on BackMars. Each university or teacher may operate an independent instance;
 accounts and first-come public names belong only to that instance.
+
+## v0.5.0
+
+- Optional Google and Facebook sign-in with explicit account linking.
+- Additive migration 6 preserves existing accounts and projects.
+- Aggregate account and Cloud activity statistics, separated by usage context.
+- See [the setup guide in Portuguese](SOCIAL-LOGIN.md) for provider configuration.
 
 ## v0.4.1
 
@@ -200,3 +207,8 @@ This improves concurrency but does not replace backups. Use SQLite's online
 - `models.py` — SQLite data access and atomic account/publication operations.
 - `db.py` / `schema.sql` — connection policy and additive migrations.
 - `tests/` — account, session, project, publication, migration and security tests.
+# Social sign-in and adoption statistics
+
+Optional Google/Facebook login, explicit linking to existing Cloud accounts and
+server-confirmed aggregate account activity are documented in [SOCIAL-LOGIN.md](SOCIAL-LOGIN.md).
+

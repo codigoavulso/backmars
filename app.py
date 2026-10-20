@@ -141,6 +141,11 @@ def create_app(config_overrides: dict[str, Any] | None = None) -> Flask:
     with app.app_context():
         ensure_database()
 
+    from social_auth import init_app as init_social_auth
+    from account_statistics import init_app as init_account_statistics
+    init_social_auth(app)
+    init_account_statistics(app)
+
     @app.get("/api/health")
     def health() -> tuple[dict[str, object], int]:
         return {
@@ -175,7 +180,7 @@ def create_app(config_overrides: dict[str, Any] | None = None) -> Flask:
             # If-Match carries the optimistic-locking token on project writes,
             # and ETag has to be exposed or cross-origin callers cannot read it
             # back off the response.
-            response.headers["Access-Control-Allow-Headers"] = "Content-Type, If-Match"
+            response.headers["Access-Control-Allow-Headers"] = "Content-Type, If-Match, X-WebMARS-Context"
             response.headers["Access-Control-Expose-Headers"] = "ETag"
             response.headers["Access-Control-Allow-Methods"] = "GET, POST, PUT, DELETE, OPTIONS"
         return response

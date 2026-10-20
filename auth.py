@@ -263,9 +263,12 @@ def login() -> tuple[object, int]:
         return response, status
 
     user = get_user_by_email(username.lower()) if "@" in username else get_user_by_username(username)
-    password_hash = user["password_hash"] if user else _DUMMY_PASSWORD_HASH
+    # Social-only users also traverse the expensive dummy verifier. An empty
+    # hash must neither authenticate nor reveal which email uses social login.
+    has_password = bool(user and user["password_hash"])
+    password_hash = user["password_hash"] if has_password else _DUMMY_PASSWORD_HASH
     password_is_valid = verify_password(password, password_hash)
-    if not user or not password_is_valid:
+    if not user or not has_password or not password_is_valid:
         return json_error("Invalid credentials.", 401)
     # The reservation protected the expensive verifier from a concurrent burst.
     # A valid login is not a failed attempt, so remove only its own row; earlier

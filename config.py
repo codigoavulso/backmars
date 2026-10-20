@@ -49,6 +49,13 @@ def _int_from_aliases(*names: str, default: int) -> int:
 
 
 class Config:
+    GOOGLE_CLIENT_ID = os.environ.get("BACKMARS_GOOGLE_CLIENT_ID", "")
+    GOOGLE_CLIENT_SECRET = os.environ.get("BACKMARS_GOOGLE_CLIENT_SECRET", "")
+    FACEBOOK_CLIENT_ID = os.environ.get("BACKMARS_FACEBOOK_CLIENT_ID", "")
+    FACEBOOK_CLIENT_SECRET = os.environ.get("BACKMARS_FACEBOOK_CLIENT_SECRET", "")
+    # Set explicitly to a supported Graph API version before enabling Facebook.
+    FACEBOOK_API_VERSION = os.environ.get("BACKMARS_FACEBOOK_API_VERSION", "")
+    OAUTH_CALLBACK_BASE = os.environ.get("BACKMARS_OAUTH_CALLBACK_BASE", "").rstrip("/")
     SECRET_KEY = os.environ.get("SECRET_KEY", DEV_SECRET_KEY)
     DATABASE = Path(
         _env_first(

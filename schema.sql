@@ -1,5 +1,37 @@
 PRAGMA foreign_keys = ON;
 
+CREATE TABLE IF NOT EXISTS external_identities (
+    provider TEXT NOT NULL,
+    subject TEXT NOT NULL,
+    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    created_at TEXT NOT NULL,
+    PRIMARY KEY (provider, subject),
+    UNIQUE (user_id, provider)
+);
+
+CREATE TABLE IF NOT EXISTS oauth_flows (
+    state TEXT PRIMARY KEY,
+    binding_hash TEXT NOT NULL,
+    provider TEXT NOT NULL,
+    link_user_id INTEGER,
+    context TEXT NOT NULL DEFAULT 'public',
+    session_version INTEGER,
+    attempt_id INTEGER,
+    expires_at INTEGER NOT NULL,
+    consumed INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE TABLE IF NOT EXISTS account_counters (
+    bucket INTEGER NOT NULL, event TEXT NOT NULL, method TEXT NOT NULL, context TEXT NOT NULL,
+    count INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (bucket, event, method, context)
+);
+
+CREATE TABLE IF NOT EXISTS account_visits (
+    bucket INTEGER NOT NULL, user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    context TEXT NOT NULL, PRIMARY KEY(bucket, user_id, context)
+);
+
 CREATE TABLE IF NOT EXISTS schema_migrations (
     version INTEGER PRIMARY KEY,
     applied_at TEXT NOT NULL

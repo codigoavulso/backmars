@@ -1,4 +1,4 @@
-# BackMars v0.4.1 deployment and upgrade checklist
+# BackMars v0.5.0 deployment and upgrade checklist
 
 This procedure assumes Nginx → Gunicorn → Flask on Linux. Adapt paths and the
 service account, but keep the security boundaries.
@@ -23,8 +23,8 @@ operation so WAL state is included:
 
 ```bash
 sudo -u backmars sqlite3 /var/lib/backmars/app.db \
-  ".backup '/var/lib/backmars/backups/pre-0.4.1.db'"
-sudo chmod 600 /var/lib/backmars/backups/pre-0.4.1.db
+  ".backup '/var/lib/backmars/backups/pre-0.5.0.db'"
+sudo chmod 600 /var/lib/backmars/backups/pre-0.5.0.db
 ```
 
 Test the backup with `PRAGMA integrity_check;` and record its checksum outside
@@ -65,13 +65,15 @@ only unexpired verification/reset codes.
 3. Point the service at the root-only `EnvironmentFile`; remove inline secrets
    from the unit file.
 4. Start one worker first. Startup takes a SQLite write lock, replays the
-   idempotent schema and applies additive migrations through version 5.
+   idempotent schema and applies additive migrations through version 6.
 5. Confirm startup logs contain no migration error, then run normal workers.
 6. Reload Nginx only after `nginx -t` succeeds.
 
 The migration preserves existing users/projects and adds email/session state,
 account codes, registration throttling, publications, revisions and revision
 metadata snapshots. It never releases or deletes a public name.
+
+Social sign-in is optional: configure providers using [SOCIAL-LOGIN.md](SOCIAL-LOGIN.md). Migration 6 adds external identities, one-use OAuth flows and aggregate account statistics. Keep OAuth callback query strings out of access logs.
 
 ## 6. Reverse proxy
 
@@ -89,7 +91,7 @@ Do not expose Gunicorn directly or trust arbitrary `X-Forwarded-For` headers.
 
 Use a dedicated test account and project:
 
-1. `GET /api/health` reports `version: 0.4.1` and `mailConfigured: true`.
+1. `GET /api/health` reports `version: 0.5.0` and `mailConfigured: true`.
 2. Registration queues one verification message; confirm the six-digit code.
 3. Login works by username and email and sets Secure, HttpOnly session cookie.
 4. Request password reset, use the code once, confirm the old password fails and

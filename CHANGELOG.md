@@ -3,6 +3,14 @@
 All notable BackMars changes are recorded here. BackMars follows semantic
 versioning independently from webMARS and the Manual.
 
+## [0.5.0] — 2026-10-20
+
+- Added optional Google OpenID Connect and Facebook sign-in with explicit linking to existing accounts.
+- Added one-use, expiring OAuth flows with origin, state, nonce and replay protection; provider tokens are not persisted.
+- Added migration 6 for external identities and aggregate account/Cloud activity statistics.
+- Added public aggregate statistics by usage context and a Portuguese provider setup guide.
+- Preserved password sign-in, account recovery and all existing Cloud data.
+
 ## [0.4.1] — 2026-09-03
 
 ### Security
