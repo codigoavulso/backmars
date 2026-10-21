@@ -242,6 +242,9 @@ class PublicationTests(unittest.TestCase):
             first_page.get_json()["publications"][0]["slug"],
             second_page.get_json()["publications"][0]["slug"],
         )
+        filtered = self.client.get("/api/publications/mine?q=second-exercise&limit=1").get_json()
+        self.assertEqual([item["slug"] for item in filtered["publications"]], ["second-exercise"])
+        self.assertFalse(filtered["hasMore"])
         self.assertEqual(invalid_edit.status_code, 400)
         self.assertEqual(invalid_edit.get_json()["error"], "A JSON object is required.")
         self.assertEqual(invalid_revision.status_code, 400)

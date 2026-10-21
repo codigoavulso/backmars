@@ -286,6 +286,7 @@ def own_publications() -> tuple[object, int]:
         limit=limit + 1,
         offset=offset,
         owner_id=current_user_id(),
+        query=str(request.args.get("q", "")).strip(),
     )
     return jsonify({
         "publications": page[:limit],
