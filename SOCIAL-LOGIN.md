@@ -65,8 +65,21 @@ escolha **Cloud → Métodos de entrada associados**.
 Se o email já pertencer a uma conta local, o início de sessão com um fornecedor
 externo não associa automaticamente as contas nem permite assumir o controlo da conta
 existente. Entre pelo método habitual e associe explicitamente o Google ou o Facebook
-através do menu Cloud. Uma identidade já associada a outra conta local não pode ser
-reatribuída. A associação preserva o identificador local do utilizador e,
+através do menu Cloud. Se a identidade Google já criou uma conta sem palavra-passe,
+a aplicação propõe fundir essa conta na conta principal com palavra-passe. É preciso
+autorizar novamente o Google, confirmar a fusão e introduzir a palavra-passe da conta
+principal. A prova expira em dez minutos e fica associada à sessão e às versões de
+segurança das duas contas; não há fusões por coincidência de email.
+
+A fusão preserva o nome, email e palavra-passe da conta principal. Transfere todos
+os projetos e publicações (incluindo ligações e revisões); projetos com nomes iguais
+recebem um sufixo «Google», sem substituir conteúdo. A conta Google duplicada é
+eliminada apenas depois da transferência, numa única transação. As sessões antigas
+das duas contas e códigos de recuperação pendentes ficam invalidados. Contas de
+origem com palavra-passe própria ou fornecedores incompatíveis não são fundidas.
+Cancelar a janela não altera nenhuma conta.
+
+A associação simples preserva o identificador local do utilizador e,
 consequentemente, a propriedade de todos os projetos e publicações.
 
 A autorização começa num endpoint POST que exige um cabeçalho `Origin` autorizado.

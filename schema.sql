@@ -1,5 +1,14 @@
 PRAGMA foreign_keys = ON;
 
+CREATE TABLE IF NOT EXISTS account_merges (
+    token TEXT PRIMARY KEY,
+    source_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    target_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    source_version INTEGER NOT NULL,
+    target_version INTEGER NOT NULL,
+    expires_at INTEGER NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS external_identities (
     provider TEXT NOT NULL,
     subject TEXT NOT NULL,

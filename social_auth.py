@@ -14,7 +14,7 @@ from flask import Blueprint, current_app, jsonify, make_response, request, sessi
 from auth import _valid_email, establish_user_session
 from db import get_db
 from models import discard_login_attempt, get_user_by_id, get_user_session_version, reserve_login_attempt, reserve_registration_attempt, utc_now
-from utils import client_address, current_user_id, json_error, session_is_current
+from utils import client_address, current_user_id, json_error, session_is_current, verify_password
 
 bp = Blueprint("social_auth", __name__)
 
@@ -108,6 +108,18 @@ def _resolve_identity(name, subject, email, verified, flow):
         link_id = flow["link_user_id"]
         if identity:
             if link_id and identity[0] != link_id:
+                source = db.execute("SELECT * FROM users WHERE id=?", (identity[0],)).fetchone()
+                target = db.execute("SELECT * FROM users WHERE id=?", (link_id,)).fetchone()
+                # A fresh provider authorization proves ownership of the source.
+                # Password-based source accounts need a separate recovery flow.
+                if name == "google" and source and target and not source["password_hash"] and target["password_hash"]:
+                    token = secrets.token_urlsafe(32)
+                    db.execute("DELETE FROM account_merges WHERE target_id=? OR expires_at<?", (link_id, int(time.time())))
+                    db.execute("INSERT INTO account_merges VALUES (?,?,?,?,?,?)", (token, source["id"], link_id,
+                               source["session_version"], target["session_version"], int(time.time()) + 600))
+                    db.commit()
+                    session["account_merge"] = token
+                    return link_id, "merge_required"
                 raise ValueError("identity_conflict")
             db.commit()
             return identity[0], False
@@ -184,6 +196,10 @@ def callback(name):
         if not flow["link_user_id"] and not known and reserve_registration_attempt(client_address(), 3600, 20) is None:
             raise ValueError("rate_limited")
         user_id, created = _resolve_identity(name, subject, email, verified, flow)
+        if created == "merge_required":
+            if flow["attempt_id"]:
+                discard_login_attempt(flow["attempt_id"])
+            return _finish("merge_required", name, state)
         if flow["attempt_id"]:
             discard_login_attempt(flow["attempt_id"])
         establish_user_session(user_id)
@@ -209,3 +225,86 @@ def callback(name):
     except Exception:
         # Provider errors can contain tokens/authorization codes. Never log them.
         return _finish("sign_in_failed", name, state)
+
+
+def _pending_merge():
+    if not session_is_current():
+        return None
+    row = get_db().execute("""SELECT m.*, s.username AS source_username, s.email AS source_email,
+        t.username AS target_username, t.password_hash AS target_password
+        FROM account_merges m JOIN users s ON s.id=m.source_id JOIN users t ON t.id=m.target_id
+        WHERE m.token=? AND m.target_id=? AND m.expires_at>?
+        AND m.source_version=s.session_version AND m.target_version=t.session_version
+        AND s.password_hash=''""", (session.get("account_merge", ""), current_user_id(), int(time.time()))).fetchone()
+    return row
+
+
+@bp.get("/api/auth/merge")
+def merge_preview():
+    row = _pending_merge()
+    if not row:
+        return json_error("Account merge expired. Link Google again.", 409)
+    db = get_db()
+    response = jsonify({"source": {"username": row["source_username"], "email": row["source_email"]},
+                    "target": row["target_username"],
+                    "projects": db.execute("SELECT COUNT(*) FROM projects WHERE user_id=?", (row["source_id"],)).fetchone()[0],
+                    "publications": db.execute("SELECT COUNT(*) FROM publications WHERE owner_id=?", (row["source_id"],)).fetchone()[0]})
+    response.headers["Cache-Control"] = "no-store"
+    return response
+
+
+@bp.post("/api/auth/merge")
+def merge_accounts():
+    from app import allowed_origins
+    if request.headers.get("Origin") not in allowed_origins():
+        return json_error("Origin is not allowed.", 403)
+    row = _pending_merge()
+    if not row:
+        return json_error("Account merge expired. Link Google again.", 409)
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict) or data.get("confirm") is not True:
+        return json_error("Confirm the account merge.")
+    password = data.get("password")
+    if not isinstance(password, str) or not password or len(password) > current_app.config["PASSWORD_MAX_LENGTH"]:
+        return json_error("Invalid credentials.", 401)
+    attempt = reserve_login_attempt(client_address(), 900, 10)
+    if attempt is None:
+        return json_error("Too many sign-in attempts. Try again later.", 429)
+    if not verify_password(password, row["target_password"]):
+        return json_error("Invalid credentials.", 401)
+    db = get_db()
+    db.execute("BEGIN IMMEDIATE")
+    try:
+        # Revalidate both accounts under the write lock; no replay or revoked proof.
+        row = _pending_merge()
+        if not row:
+            raise ValueError("expired")
+        source, target = row["source_id"], row["target_id"]
+        conflict = db.execute("""SELECT 1 FROM external_identities a JOIN external_identities b
+            ON a.provider=b.provider WHERE a.user_id=? AND b.user_id=?""", (source, target)).fetchone()
+        if conflict:
+            raise ValueError("provider_conflict")
+        for project in db.execute("SELECT id,name FROM projects WHERE user_id=? ORDER BY id", (source,)).fetchall():
+            name = project["name"]
+            suffix = 1
+            while db.execute("SELECT 1 FROM projects WHERE user_id=? AND name=? COLLATE NOCASE", (target, name)).fetchone():
+                name = f"{project['name']} (Google{'' if suffix == 1 else ' ' + str(suffix)})"
+                suffix += 1
+            db.execute("UPDATE projects SET user_id=?,name=? WHERE id=?", (target, name, project["id"]))
+        db.execute("UPDATE publications SET owner_id=? WHERE owner_id=?", (target, source))
+        db.execute("UPDATE external_identities SET user_id=? WHERE user_id=?", (target, source))
+        db.execute("INSERT OR IGNORE INTO account_visits SELECT bucket,?,context FROM account_visits WHERE user_id=?", (target, source))
+        db.execute("DELETE FROM account_codes WHERE user_id=?", (target,))
+        db.execute("DELETE FROM oauth_flows WHERE link_user_id IN (?,?)", (source, target))
+        db.execute("DELETE FROM users WHERE id=?", (source,))
+        db.execute("UPDATE users SET session_version=session_version+1 WHERE id=?", (target,))
+        db.commit()
+    except ValueError:
+        db.rollback()
+        return json_error("Accounts could not be merged. Link Google again.", 409)
+    except Exception:
+        db.rollback()
+        raise
+    discard_login_attempt(attempt)
+    establish_user_session(target)
+    return jsonify({"user": get_user_by_id(target), "merged": True})

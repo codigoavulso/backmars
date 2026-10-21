@@ -43,6 +43,95 @@ class SocialAuthTests(unittest.TestCase):
         self.assertEqual(self.client.post("/api/auth/google/start", json={}).status_code, 403)
         self.assertEqual(self.client.post("/api/auth/google/start", json={"intent": "link"}, headers=ORIGIN).status_code, 401)
 
+    def prepare_merge(self):
+        self.finish(self.start()["state"])
+        source = self.client.get("/api/me").get_json()["user"]["id"]
+        old_cookie = self.client.get_cookie("session").value
+        self.client.post("/api/logout")
+        self.client.post("/api/register", json={"username": "primary", "email": "primary@example.com", "password": "correct horse battery staple"})
+        target = self.client.get("/api/me").get_json()["user"]["id"]
+        with self.app.app_context():
+            db = get_db()
+            for owner, name, content in [(source, "Demo", '{"files":{"source":"saved"}}'),
+                                         (target, "demo", '{"files":{"target":"saved"}}')]:
+                db.execute("INSERT INTO projects(user_id,name,project_json,created_at,updated_at) VALUES (?,?,?, 'now','now')", (owner, name, content))
+            db.execute("INSERT INTO publications(owner_id,slug,title,created_at,updated_at) VALUES (?, 'permanent-link', 'Published work','now','now')", (source,))
+            db.commit()
+        response = self.finish(self.start(intent="link")["state"])
+        self.assertIn('"status": "merge_required"', response.get_data(as_text=True))
+        return source, target, old_cookie
+
+    def test_merge_preserves_both_projects_and_public_links_and_revokes_source_session(self):
+        source, target, old_cookie = self.prepare_merge()
+        preview = self.client.get("/api/auth/merge").get_json()
+        self.assertEqual((preview["target"], preview["projects"], preview["publications"]), ("primary", 1, 1))
+        # Discovery/cancellation alone cannot change ownership.
+        with self.app.app_context():
+            self.assertEqual(get_db().execute("SELECT COUNT(*) FROM users").fetchone()[0], 2)
+        data = {"confirm": True, "password": "correct horse battery staple"}
+        self.assertEqual(self.client.post("/api/auth/merge", json=data).status_code, 403)
+        response = self.client.post("/api/auth/merge", json=data, headers=ORIGIN)
+        self.assertEqual(response.status_code, 200, response.get_data(as_text=True))
+        self.assertEqual(response.get_json()["user"]["id"], target)
+        self.assertEqual(self.client.post("/api/auth/merge", json=data, headers=ORIGIN).status_code, 409)
+        with self.app.app_context():
+            db = get_db()
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM users WHERE id=?", (source,)).fetchone()[0], 0)
+            projects = db.execute("SELECT name,project_json FROM projects WHERE user_id=? ORDER BY id", (target,)).fetchall()
+            self.assertEqual({p["name"] for p in projects}, {"demo", "Demo (Google)"})
+            self.assertTrue(any('"source"' in p["project_json"] for p in projects))
+            self.assertTrue(any('"target"' in p["project_json"] for p in projects))
+            self.assertEqual(db.execute("SELECT owner_id FROM publications WHERE slug='permanent-link'").fetchone()[0], target)
+            self.assertEqual(db.execute("PRAGMA foreign_key_check").fetchall(), [])
+        old = self.app.test_client(); old.set_cookie("session", old_cookie)
+        self.assertFalse(old.get("/api/me").get_json()["authenticated"])
+        self.client.post("/api/logout")
+        self.finish(self.start()["state"])
+        self.assertEqual(self.client.get("/api/me").get_json()["user"]["id"], target)
+        self.client.post("/api/logout")
+        self.assertEqual(self.client.post("/api/login", json={"username":"primary", "password":data["password"]}).status_code, 200)
+
+    def test_merge_requires_password_and_fresh_proof_for_both_accounts(self):
+        source, target, _ = self.prepare_merge()
+        self.assertEqual(self.client.post("/api/auth/merge", json={"confirm": True, "password":"incorrect"}, headers=ORIGIN).status_code, 401)
+        self.assertEqual(self.client.post("/api/auth/merge", json={"password":"correct horse battery staple"}, headers=ORIGIN).status_code, 400)
+        with self.app.app_context():
+            get_db().execute("UPDATE users SET session_version=session_version+1 WHERE id=?", (source,)); get_db().commit()
+        self.assertEqual(self.client.post("/api/auth/merge", json={"confirm": True, "password":"correct horse battery staple"}, headers=ORIGIN).status_code, 409)
+        with self.app.app_context():
+            self.assertEqual(get_db().execute("SELECT COUNT(*) FROM users").fetchone()[0], 2)
+
+    def test_merge_proof_expires_and_cannot_be_used_in_another_browser(self):
+        self.prepare_merge()
+        self.assertEqual(self.app.test_client().get("/api/auth/merge").status_code, 409)
+        with self.app.app_context():
+            get_db().execute("UPDATE account_merges SET expires_at=0"); get_db().commit()
+        self.assertEqual(self.client.post("/api/auth/merge", json={"confirm": True, "password":"correct horse battery staple"}, headers=ORIGIN).status_code, 409)
+
+    def test_merge_rolls_back_all_transfers_if_a_later_write_fails(self):
+        self.prepare_merge()
+        with self.app.app_context():
+            db = get_db()
+            before = [tuple(r) for r in db.execute("SELECT id,user_id,name FROM projects ORDER BY id")]
+            db.execute("CREATE TRIGGER prevent_transfer BEFORE UPDATE ON publications BEGIN SELECT RAISE(ABORT, 'test rollback'); END")
+            db.commit()
+        with self.assertLogs(self.app.logger, level="ERROR"):
+            response = self.client.post("/api/auth/merge", json={"confirm": True, "password":"correct horse battery staple"}, headers=ORIGIN)
+        self.assertEqual(response.status_code, 500)
+        with self.app.app_context():
+            self.assertEqual([tuple(r) for r in get_db().execute("SELECT id,user_id,name FROM projects ORDER BY id")], before)
+            self.assertEqual(get_db().execute("SELECT COUNT(*) FROM users").fetchone()[0], 2)
+
+    def test_merge_does_not_discard_another_accounts_password(self):
+        source, _, _ = self.prepare_merge()
+        with self.app.app_context():
+            from utils import hash_password
+            get_db().execute("UPDATE users SET password_hash=? WHERE id=?", (hash_password("another account password"), source))
+            get_db().commit()
+        response = self.finish(self.start(intent="link")["state"])
+        self.assertIn('"status": "identity_conflict"', response.get_data(as_text=True))
+        self.assertEqual(self.client.get("/api/auth/merge").status_code, 409)
+
     def test_google_creates_and_reuses_one_cloud_account_with_minimal_scope(self):
         start = self.start()
         self.assertIn("scope=openid+email", start["url"])
