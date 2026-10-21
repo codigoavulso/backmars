@@ -6,7 +6,7 @@ from db import get_db
 from utils import current_user_id
 
 
-def record_account_event(event, method="password", context=None):
+def record_account_event(event, method="session", context=None):
     context = context or request.headers.get("X-WebMARS-Context", "public")
     if context not in {"public", "internal", "test"}:
         context = "public"
@@ -36,7 +36,10 @@ def init_app(app):
             where += " AND context=?"
             args.append(context)
         db = get_db()
-        rows = db.execute(f"SELECT event,method,SUM(count) AS count FROM account_counters WHERE {where} GROUP BY event,method ORDER BY event,method", args).fetchall()
+        # Cloud reads/writes use an authenticated session, not necessarily a
+        # password login. Normalize historical defaults without rewriting data.
+        method = "CASE WHEN event IN ('cloud_load','cloud_save') THEN 'session' ELSE method END"
+        rows = db.execute(f"SELECT event,{method} AS method,SUM(count) AS count FROM account_counters WHERE {where} GROUP BY event,{method} ORDER BY event,method", args).fetchall()
         active = db.execute(f"SELECT COUNT(DISTINCT user_id) FROM account_visits WHERE {where}", args).fetchone()[0]
         response = jsonify({"precision": "minute", "from": cutoff, "context": context,
                             "active_accounts": active, "events": [dict(r) for r in rows],
@@ -52,9 +55,9 @@ def init_app(app):
                      "projects.read_project": "cloud_load"}.get(request.endpoint)
             if event:
                 try:
-                    record_account_event(event)
+                    record_account_event(event, "password" if event in {"account_created", "login_success"} else "session")
                     if event == "account_created":
-                        record_account_event("login_success")
+                        record_account_event("login_success", "password")
                 except sqlite3.Error:
                     app.logger.warning("Account statistics unavailable")
             elif request.endpoint in {"auth.me", "projects.list_projects", "projects.read_project"} and current_user_id():

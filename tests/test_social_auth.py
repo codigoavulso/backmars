@@ -43,6 +43,15 @@ class SocialAuthTests(unittest.TestCase):
         self.assertEqual(self.client.post("/api/auth/google/start", json={}).status_code, 403)
         self.assertEqual(self.client.post("/api/auth/google/start", json={"intent": "link"}, headers=ORIGIN).status_code, 401)
 
+    def test_cloud_statistics_do_not_mislabel_session_actions_as_password_logins(self):
+        with self.app.app_context():
+            db = get_db()
+            for method, count in [("password", 5), ("session", 2)]:
+                db.execute("INSERT INTO account_counters VALUES(?,?,?,?,?)", (int(time.time())//60*60,"cloud_load",method,"public",count))
+            db.commit()
+        result = self.client.get("/api/statistics?window=24h").get_json()
+        self.assertEqual(result["events"], [{"event":"cloud_load", "method":"session", "count":7}])
+
     def prepare_merge(self):
         self.finish(self.start()["state"])
         source = self.client.get("/api/me").get_json()["user"]["id"]

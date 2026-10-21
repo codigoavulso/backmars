@@ -307,4 +307,9 @@ def merge_accounts():
         raise
     discard_login_attempt(attempt)
     establish_user_session(target)
+    try:
+        from account_statistics import record_account_event
+        record_account_event("account_linked", "google")
+    except sqlite3.Error:
+        current_app.logger.warning("Account statistics unavailable")
     return jsonify({"user": get_user_by_id(target), "merged": True})
