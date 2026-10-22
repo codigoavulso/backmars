@@ -155,6 +155,24 @@ def create_app(config_overrides: dict[str, Any] | None = None) -> Flask:
             "mailConfigured": mail_is_configured(),
         }, 200
 
+    @app.get("/api/capabilities")
+    def capabilities() -> tuple[dict[str, object], int]:
+        """Describe the stable API features a webMARS client can use."""
+        return {
+            "ok": True,
+            "service": "webmars-users",
+            "version": APP_VERSION,
+            "contracts": {
+                "projectsV2": True,
+                "publicPublicationFilters": True,
+                "publicPublicationRevisionListing": True,
+            },
+            "limits": {
+                "projectListMax": 100,
+                "publicationListMax": int(app.config["PUBLICATION_LIST_LIMIT"]),
+            },
+        }, 200
+
     @app.route("/api", methods=["OPTIONS"])
     @app.route("/api/<path:_path>", methods=["OPTIONS"])
     def preflight(_path: str | None = None) -> tuple[str, int]:

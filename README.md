@@ -1,4 +1,4 @@
-# BackMars v0.5.0
+# BackMars v0.6.0
 
 BackMars is the optional, self-hostable service for webMARS accounts, private
 Cloud projects, email-based account recovery and the per-installation Public
@@ -8,6 +8,13 @@ vendor-specific mail dependency: any standards-compliant SMTP relay works.
 The webMARS assembler, simulator, tools and local project storage do not depend
 on BackMars. Each university or teacher may operate an independent instance;
 accounts and first-come public names belong only to that instance.
+
+## v0.6.0
+
+- Paginated project API v2, stable client identities and recoverable project deletion.
+- Additive migration 7 preserves existing users, publications and projects.
+- Username setup for Google accounts and filtered publication listings.
+- Compatible with webMARS v0.6.5 and existing v1 clients.
 
 ## v0.5.0
 
@@ -100,10 +107,14 @@ Use `backmars.env.example` as a field reference and follow
 ### Health and accounts
 
 - `GET /api/health` — service/version and `mailConfigured`.
+- `GET /api/capabilities` — feature contracts and server-side list limits for
+  clients that need to negotiate optional Cloud/public-library flows.
 - `POST /api/register` — creates account/session; queues verification mail.
 - `POST /api/login` — username or email; failed attempts are rate limited.
 - `POST /api/logout` — invalidates the browser cookie immediately.
 - `GET /api/me` — current session and `emailVerified` state.
+- `PATCH /api/me` — changes the authenticated user's username; names are
+  validated and must be unique.
 - `POST /api/password-reset/request` — always returns the same accepted response
   for known and unknown valid email addresses.
 - `POST /api/password-reset/confirm` — email, temporary code and new password.
@@ -114,6 +125,16 @@ Use `backmars.env.example` as a field reference and follow
 
 - `GET /api/projects?include=documents` — projects, documents, ETags and server
   time for sync.
+- `GET /api/v2/projects?q=&scope=active|trash&sort=&order=&limit=&offset=` —
+  paginated metadata for the unified project manager; documents are omitted
+  unless explicitly requested.
+- `POST /api/v2/projects` — idempotent creation using `clientProjectId`.
+- `GET/PUT /api/v2/projects/<id>` — read or update one owned project with an
+  exact `If-Match` token.
+- `POST /api/v2/projects/<id>/trash` and `/restore` — explicit soft-delete and
+  restore operations.
+- `DELETE /api/v2/projects/<id>` — permanently removes an item already in the
+  recycle bin, with `If-Match`.
 - `POST /api/projects` — create; project names are unique per user without case
   distinctions.
 - `GET /api/projects/<id>` — document plus `ETag`.
@@ -123,13 +144,16 @@ Use `backmars.env.example` as a field reference and follow
 
 ### Public Library
 
-- `GET /api/publications?q=&limit=&offset=` — anonymous published listing.
+- `GET /api/publications?q=&author=&kind=&language=&difficulty=&sort=&order=&limit=&offset=` — anonymous published listing with server-side filters and deterministic ordering.
 - `GET /api/publications/<slug>` — latest published/unlisted revision; short
   cache lifetime.
 - `GET /api/publications/<slug>/revisions/<N>` — immutable pinned snapshot;
   one-year immutable cache and readable after ordinary archive.
 - `GET /api/publications/mine?limit=&offset=` — paginated authenticated owner
   listing, including `hasMore`.
+- `GET /api/publications/<slug>/revisions?limit=&offset=` — paginated revision
+  metadata; archived revisions are visible only to the owner, while source
+  files remain available through the pinned revision route.
 - `POST /api/publications` — claim permanent name and publish revision 1.
 - `POST /api/publications/<slug>/revisions` — add immutable revision.
 - `PUT /api/publications/<slug>` — edit latest metadata/visibility; the slug

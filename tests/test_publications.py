@@ -96,6 +96,51 @@ class PublicationTests(unittest.TestCase):
         self.assertTrue(first["hasMore"])
         self.assertFalse(second["hasMore"])
 
+    def test_public_listing_supports_metadata_filters_and_sorting(self) -> None:
+        self.assertEqual(self.publish().status_code, 201)
+        second = self.payload(slug="second-lab")
+        second.update({
+            "title": "Assembly lab",
+            "kind": "lab",
+            "language": "pt",
+            "difficulty": "advanced",
+        })
+        self.assertEqual(self.client.post("/api/publications", json=second).status_code, 201)
+
+        filtered = self.client.get(
+            "/api/publications?kind=lab&language=pt&difficulty=advanced&sort=title&order=asc"
+        )
+        self.assertEqual(filtered.status_code, 200)
+        publications = filtered.get_json()["publications"]
+        self.assertEqual([item["slug"] for item in publications], ["second-lab"])
+
+        by_author = self.client.get("/api/publications?author=ALI").get_json()["publications"]
+        self.assertEqual(len(by_author), 2)
+
+    def test_public_revision_listing_is_paginated_and_hides_archived_items_anonymously(self) -> None:
+        self.assertEqual(self.publish().status_code, 201)
+        self.assertEqual(
+            self.client.post(
+                "/api/publications/first-exercise/revisions",
+                json={"project": {"files": {"main.asm": "li $v0, 2"}}},
+            ).status_code,
+            201,
+        )
+        page = self.client.get("/api/publications/first-exercise/revisions?limit=1&offset=0")
+        self.assertEqual(page.status_code, 200)
+        self.assertEqual(len(page.get_json()["revisions"]), 1)
+        self.assertTrue(page.get_json()["hasMore"])
+        self.assertEqual(page.get_json()["revisions"][0]["revision"], 2)
+
+        self.assertEqual(self.client.delete("/api/publications/first-exercise").status_code, 200)
+        owner_revisions = self.client.get("/api/publications/first-exercise/revisions")
+        self.assertEqual(len(owner_revisions.get_json()["revisions"]), 2)
+        anonymous = self.app.test_client()
+        self.assertEqual(
+            len(anonymous.get("/api/publications/first-exercise/revisions").get_json()["revisions"]),
+            0,
+        )
+
     def test_publication_fields_refuse_implicit_object_to_string_coercion(self) -> None:
         invalid_title = self.payload(slug="invalid-title")
         invalid_title["title"] = {"unexpected": "object"}

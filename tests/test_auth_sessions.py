@@ -24,6 +24,16 @@ class PersistentAuthSessionTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.get_json()["version"], "0.5.0")
 
+    def test_capabilities_describe_the_project_and_publication_contracts(self) -> None:
+        response = self.client.get("/api/capabilities")
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.get_json()
+        self.assertTrue(payload["contracts"]["projectsV2"])
+        self.assertTrue(payload["contracts"]["publicPublicationFilters"])
+        self.assertTrue(payload["contracts"]["publicPublicationRevisionListing"])
+        self.assertGreaterEqual(payload["limits"]["publicationListMax"], 1)
+
     def setUp(self) -> None:
         self.temporary_directory = tempfile.TemporaryDirectory()
         database_path = Path(self.temporary_directory.name) / "test.db"
@@ -111,6 +121,31 @@ class PersistentAuthSessionTests(unittest.TestCase):
         expired_cookie = self.session_cookie_from(logout_response)
         self.assertEqual(expired_cookie["max-age"], "0")
         self.assertFalse(me_response.get_json()["authenticated"])
+
+    def test_authenticated_user_can_choose_a_unique_username(self) -> None:
+        self.register()
+
+        response = self.client.patch("/api/me", json={"username": "chosen-name"})
+        me_response = self.client.get("/api/me")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.get_json()["user"]["username"], "chosen-name")
+        self.assertEqual(me_response.get_json()["user"]["username"], "chosen-name")
+
+    def test_username_change_rejects_an_existing_name(self) -> None:
+        self.register()
+        self.client.post("/api/logout", json={})
+        self.client.post(
+            "/api/register",
+            json={"username": "other-user", "email": "other@example.com", "password": "correct horse battery staple"},
+        )
+        self.client.post("/api/logout", json={})
+        self.client.post("/api/login", json={"username": "session-user", "password": "correct horse battery staple"})
+
+        response = self.client.patch("/api/me", json={"username": "other-user"})
+
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(response.get_json()["field"], "username")
 
     def test_login_also_creates_a_permanent_session(self) -> None:
         self.register()

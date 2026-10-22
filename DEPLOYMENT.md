@@ -65,7 +65,7 @@ only unexpired verification/reset codes.
 3. Point the service at the root-only `EnvironmentFile`; remove inline secrets
    from the unit file.
 4. Start one worker first. Startup takes a SQLite write lock, replays the
-   idempotent schema and applies additive migrations through version 6.
+   idempotent schema and applies additive migrations through version 7.
 5. Confirm startup logs contain no migration error, then run normal workers.
 6. Reload Nginx only after `nginx -t` succeeds.
 

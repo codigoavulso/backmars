@@ -96,6 +96,10 @@ de origem, a origem e o estado da mensagem e consulta `/api/me` antes de aceitar
 início de sessão como bem-sucedido. Os erros dos fornecedores não são registados com
 os respetivos tokens.
 
+Quando o Google cria uma conta nova, o frontend pede um nome de utilizador antes de
+concluir o fluxo. O nome é guardado através de `PATCH /api/me` e o servidor rejeita
+nomes inválidos ou já utilizados.
+
 ## Estatísticas das contas
 
 `GET /api/statistics?window=60m|24h|30d&context=public|internal|test|all` devolve

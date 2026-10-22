@@ -225,6 +225,58 @@ class ServerClockTests(ProjectSyncTestCase):
         self.assertTrue(server_time.endswith("+00:00"))
 
 
+class PaginatedProjectListTests(ProjectSyncTestCase):
+    def test_v2_project_list_pages_and_filters_before_serializing(self) -> None:
+        self.create_project("alpha")
+        self.create_project("beta")
+        self.create_project("gamma")
+
+        first = self.client.get("/api/v2/projects?limit=2&offset=0")
+        self.assertEqual(first.status_code, 200)
+        payload = first.get_json()
+        self.assertEqual(len(payload["projects"]), 2)
+        self.assertTrue(payload["hasMore"])
+        self.assertEqual(payload["nextOffset"], 2)
+        self.assertNotIn("project", payload["projects"][0])
+
+        filtered = self.client.get("/api/v2/projects?q=beta&include=documents")
+        self.assertEqual(filtered.status_code, 200)
+        self.assertEqual([item["name"] for item in filtered.get_json()["projects"]], ["beta"])
+        self.assertIn("project", filtered.get_json()["projects"][0])
+
+    def test_v2_project_identity_is_idempotent_and_recycle_bin_is_explicit(self) -> None:
+        payload = {
+            "clientProjectId": "local-uuid-1",
+            "name": "workspace",
+            "document": {"files": {"main.asm": "li $v0, 1"}},
+        }
+        created = self.client.post("/api/v2/projects", json=payload)
+        repeated = self.client.post("/api/v2/projects", json=payload)
+        self.assertEqual(created.status_code, 201)
+        self.assertEqual(repeated.status_code, 200)
+        project = created.get_json()["project"]
+        self.assertEqual(repeated.get_json()["project"]["id"], project["id"])
+        self.assertEqual(project["clientProjectId"], "local-uuid-1")
+        etag = project["etag"]
+
+        trashed = self.client.post(
+            f"/api/v2/projects/{project['id']}/trash",
+            headers={"If-Match": etag},
+        )
+        self.assertEqual(trashed.status_code, 200)
+        self.assertIsNotNone(trashed.get_json()["project"]["deletedAt"])
+        self.assertEqual(len(self.client.get("/api/v2/projects").get_json()["projects"]), 0)
+        trash = self.client.get("/api/v2/projects?scope=trash")
+        self.assertEqual([item["id"] for item in trash.get_json()["projects"]], [project["id"]])
+
+        restored = self.client.post(
+            f"/api/v2/projects/{project['id']}/restore",
+            headers={"If-Match": trashed.get_json()["project"]["etag"]},
+        )
+        self.assertEqual(restored.status_code, 200)
+        self.assertIsNone(restored.get_json()["project"]["deletedAt"])
+
+
 class UniqueProjectNameTests(ProjectSyncTestCase):
     def test_a_second_project_cannot_reuse_a_name(self) -> None:
         self.create_project("demo")

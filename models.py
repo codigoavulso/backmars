@@ -55,9 +55,35 @@ def _project_dict(row: Any, *, include_document: bool = False, include_etag: boo
         "name": row["name"],
         "createdAt": row["created_at"],
         "updatedAt": row["updated_at"],
+        "clientProjectId": row["client_project_id"] if "client_project_id" in row.keys() else None,
+        "deletedAt": row["deleted_at"] if "deleted_at" in row.keys() else None,
     }
     if include_document:
-        project["project"] = _parse_project_json(row["project_json"])
+        document = _parse_project_json(row["project_json"])
+        project["project"] = document
+        payload = document.get("project") if isinstance(document, dict) and isinstance(document.get("project"), dict) else document
+        files = payload.get("files", []) if isinstance(payload, dict) else []
+        if isinstance(files, dict):
+            file_count = len(files)
+            size_bytes = sum(len(str(source).encode("utf-8")) for source in files.values())
+        elif isinstance(files, list):
+            file_count = len(files)
+            size_bytes = sum(len(str(entry.get("source", "")).encode("utf-8")) for entry in files if isinstance(entry, dict))
+        else:
+            file_count = 0
+            size_bytes = 0
+        project["fileCount"] = file_count
+        project["sizeBytes"] = size_bytes
+    else:
+        try:
+            document = _parse_project_json(row["project_json"])
+            payload = document.get("project") if isinstance(document, dict) and isinstance(document.get("project"), dict) else document
+            files = payload.get("files", []) if isinstance(payload, dict) else []
+            project["fileCount"] = len(files) if isinstance(files, (dict, list)) else 0
+            project["sizeBytes"] = len(str(row["project_json"]).encode("utf-8"))
+        except Exception:
+            project["fileCount"] = 0
+            project["sizeBytes"] = 0
     if include_document or include_etag:
         project["etag"] = project_etag(row["name"], row["project_json"])
     return project
@@ -65,7 +91,7 @@ def _project_dict(row: Any, *, include_document: bool = False, include_etag: boo
 
 def get_project_etag(user_id: int, project_id: int) -> str | None:
     row = get_db().execute(
-        "SELECT name, project_json FROM projects WHERE id = ? AND user_id = ?",
+        "SELECT name, project_json FROM projects WHERE id = ? AND user_id = ? AND deleted_at IS NULL",
         (project_id, user_id),
     ).fetchone()
     if row is None:
@@ -84,6 +110,12 @@ def get_user_by_id(user_id: int) -> dict[str, Any] | None:
 def get_user_by_username(username: str) -> dict[str, Any] | None:
     row = get_db().execute("SELECT * FROM users WHERE username = ?", (username,)).fetchone()
     return dict(row) if row else None
+
+
+def update_user_username(user_id: int, username: str) -> dict[str, Any] | None:
+    get_db().execute("UPDATE users SET username = ? WHERE id = ?", (username, user_id))
+    get_db().commit()
+    return get_user_by_id(user_id)
 
 
 def get_user_by_email(email: str) -> dict[str, Any] | None:
@@ -115,9 +147,9 @@ def update_user_password_hash(user_id: int, password_hash: str) -> None:
 def list_projects_for_user(user_id: int, *, include_documents: bool = False) -> list[dict[str, Any]]:
     rows = get_db().execute(
         """
-        SELECT id, user_id, name, project_json, created_at, updated_at
+        SELECT id, user_id, client_project_id, name, project_json, created_at, updated_at, deleted_at
         FROM projects
-        WHERE user_id = ?
+        WHERE user_id = ? AND deleted_at IS NULL
         ORDER BY updated_at DESC, id DESC
         """,
         (user_id,),
@@ -129,22 +161,91 @@ def list_projects_for_user(user_id: int, *, include_documents: bool = False) -> 
     ]
 
 
-def get_project(user_id: int, project_id: int) -> dict[str, Any] | None:
+def list_projects_page_for_user(
+    user_id: int,
+    *,
+    offset: int = 0,
+    limit: int = 50,
+    query: str = "",
+    include_documents: bool = False,
+    scope: str = "active",
+    sort: str = "updated",
+    order: str = "desc",
+) -> tuple[list[dict[str, Any]], bool, int]:
+    """Return a bounded metadata page for the unified project manager.
+
+    The legacy list endpoint remains unchanged for older clients. New clients
+    must be able to search and page without downloading every document, so this
+    query filters and limits rows before serialization.
+    """
+    safe_offset = max(0, int(offset))
+    safe_limit = max(1, min(100, int(limit)))
+    needle = str(query or "").strip()
+    scope_value = str(scope or "active").strip().lower()
+    deleted_clause = "deleted_at IS NULL" if scope_value != "trash" else "deleted_at IS NOT NULL"
+    where = f"user_id = ? AND {deleted_clause}"
+    args: list[Any] = [user_id]
+    if needle:
+        where += " AND (name LIKE ? COLLATE NOCASE OR project_json LIKE ? COLLATE NOCASE)"
+        pattern = f"%{needle}%"
+        args.extend([pattern, pattern])
+    sort_columns = {"updated": "updated_at", "name": "name COLLATE NOCASE", "created": "created_at"}
+    sort_column = sort_columns.get(str(sort or "updated").strip().lower(), sort_columns["updated"])
+    direction = "ASC" if str(order or "desc").strip().lower() == "asc" else "DESC"
+    rows = get_db().execute(
+        f"""
+        SELECT id, user_id, client_project_id, name, project_json, created_at, updated_at, deleted_at
+        FROM projects
+        WHERE {where}
+        ORDER BY {sort_column} {direction}, id DESC
+        LIMIT ? OFFSET ?
+        """,
+        (*args, safe_limit + 1, safe_offset),
+    ).fetchall()
+    has_more = len(rows) > safe_limit
+    page = rows[:safe_limit]
+    return (
+        [
+            _project_dict(row, include_document=include_documents, include_etag=True)
+            for row in page
+            if row is not None
+        ],
+        has_more,
+        safe_offset + len(page),
+    )
+
+
+def get_project(user_id: int, project_id: int, *, include_deleted: bool = False) -> dict[str, Any] | None:
     row = get_db().execute(
-        "SELECT * FROM projects WHERE id = ? AND user_id = ?",
+        "SELECT * FROM projects WHERE id = ? AND user_id = ? "
+        + ("" if include_deleted else "AND deleted_at IS NULL"),
         (project_id, user_id),
     ).fetchone()
     return _project_dict(row, include_document=True)
 
 
-def create_project(user_id: int, name: str, project: dict[str, Any]) -> dict[str, Any]:
+def get_project_by_client_id(
+    user_id: int,
+    client_project_id: str,
+    *,
+    include_deleted: bool = False,
+) -> dict[str, Any] | None:
+    row = get_db().execute(
+        "SELECT * FROM projects WHERE user_id = ? AND client_project_id = ? "
+        + ("" if include_deleted else "AND deleted_at IS NULL"),
+        (user_id, client_project_id),
+    ).fetchone()
+    return _project_dict(row, include_document=True)
+
+
+def create_project(user_id: int, name: str, project: dict[str, Any], *, client_project_id: str | None = None) -> dict[str, Any]:
     now = utc_now()
     cursor = get_db().execute(
         """
-        INSERT INTO projects (user_id, name, project_json, created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?)
+        INSERT INTO projects (user_id, client_project_id, name, project_json, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?)
         """,
-        (user_id, name, json.dumps(project, ensure_ascii=False), now, now),
+        (user_id, client_project_id, name, json.dumps(project, ensure_ascii=False), now, now),
     )
     get_db().commit()
     return get_project(user_id, int(cursor.lastrowid)) or {}
@@ -159,7 +260,7 @@ def update_project(
     expected_etag: str,
 ) -> tuple[str, dict[str, Any] | None]:
     existing = get_db().execute(
-        "SELECT name, project_json FROM projects WHERE id = ? AND user_id = ?",
+        "SELECT name, project_json FROM projects WHERE id = ? AND user_id = ? AND deleted_at IS NULL",
         (project_id, user_id),
     ).fetchone()
     if existing is None:
@@ -173,7 +274,7 @@ def update_project(
         cursor = get_db().execute(
             """
             UPDATE projects SET name = ?, project_json = ?, updated_at = ?
-            WHERE id = ? AND user_id = ?
+            WHERE id = ? AND user_id = ? AND deleted_at IS NULL
             """,
             (next_name, next_payload, utc_now(), project_id, user_id),
         )
@@ -184,7 +285,7 @@ def update_project(
         cursor = get_db().execute(
             """
             UPDATE projects SET name = ?, project_json = ?, updated_at = ?
-            WHERE id = ? AND user_id = ? AND name = ? AND project_json = ?
+            WHERE id = ? AND user_id = ? AND deleted_at IS NULL AND name = ? AND project_json = ?
             """,
             (
                 next_name,
@@ -619,7 +720,19 @@ def _publication_dict(
     return publication
 
 
-def list_publications(*, query: str = "", limit: int = 50, offset: int = 0, owner_id: int | None = None) -> list[dict[str, Any]]:
+def list_publications(
+    *,
+    query: str = "",
+    limit: int = 50,
+    offset: int = 0,
+    owner_id: int | None = None,
+    author: str = "",
+    kind: str = "",
+    language: str = "",
+    difficulty: str = "",
+    sort: str = "updated",
+    order: str = "desc",
+) -> list[dict[str, Any]]:
     clauses: list[str] = []
     values: list[Any] = []
     if owner_id is None:
@@ -630,10 +743,27 @@ def list_publications(*, query: str = "", limit: int = 50, offset: int = 0, owne
     normalized_query = str(query or "").strip().lower()
     if normalized_query:
         clauses.append(
-            "(LOWER(p.slug) LIKE ? OR LOWER(p.title) LIKE ? OR LOWER(p.description) LIKE ? OR LOWER(p.tags_json) LIKE ?)"
+            "(LOWER(p.slug) LIKE ? OR LOWER(p.title) LIKE ? OR LOWER(p.description) LIKE ? OR LOWER(p.tags_json) LIKE ? OR LOWER(u.username) LIKE ?)"
         )
         pattern = f"%{normalized_query}%"
-        values.extend([pattern, pattern, pattern, pattern])
+        values.extend([pattern, pattern, pattern, pattern, pattern])
+    normalized_author = str(author or "").strip().lower()
+    if normalized_author:
+        clauses.append("LOWER(u.username) LIKE ?")
+        values.append(f"%{normalized_author}%")
+    for field, value in (("p.kind", kind), ("p.language", language), ("p.difficulty", difficulty)):
+        normalized = str(value or "").strip().lower()
+        if normalized:
+            clauses.append(f"LOWER({field}) = ?")
+            values.append(normalized)
+    sort_columns = {
+        "updated": "p.updated_at",
+        "title": "p.title COLLATE NOCASE",
+        "author": "u.username COLLATE NOCASE",
+        "created": "p.created_at",
+    }
+    sort_column = sort_columns.get(str(sort or "updated").strip().lower(), sort_columns["updated"])
+    direction = "ASC" if str(order or "desc").strip().lower() == "asc" else "DESC"
     values.extend([max(1, limit), max(0, offset)])
     rows = get_db().execute(
         f"""
@@ -641,12 +771,43 @@ def list_publications(*, query: str = "", limit: int = 50, offset: int = 0, owne
         FROM publications p
         JOIN users u ON u.id = p.owner_id
         WHERE {' AND '.join(clauses)}
-        ORDER BY p.updated_at DESC, p.id DESC
+        ORDER BY {sort_column} {direction}, p.id DESC
         LIMIT ? OFFSET ?
         """,
         values,
     ).fetchall()
     return [publication for row in rows if (publication := _publication_dict(row))]
+
+
+def list_publication_revisions(
+    slug: str,
+    *,
+    limit: int = 50,
+    offset: int = 0,
+    owner_id: int | None = None,
+) -> list[dict[str, Any]]:
+    clauses = ["p.slug = ? COLLATE NOCASE"]
+    values: list[Any] = [slug]
+    if owner_id is None:
+        clauses.append("p.status IN ('published', 'unlisted')")
+    else:
+        clauses.append("(p.status IN ('published', 'unlisted') OR p.owner_id = ?)")
+        values.append(owner_id)
+    values.extend([max(1, limit), max(0, offset)])
+    rows = get_db().execute(
+        f"""
+        SELECT p.*, u.username, r.revision, r.project_json, r.metadata_json,
+               r.webmars_version, r.created_at AS revision_created_at
+        FROM publications p
+        JOIN users u ON u.id = p.owner_id
+        JOIN publication_revisions r ON r.publication_id = p.id
+        WHERE {' AND '.join(clauses)}
+        ORDER BY r.revision DESC
+        LIMIT ? OFFSET ?
+        """,
+        values,
+    ).fetchall()
+    return [publication for row in rows if (publication := _publication_dict(row, immutable_revision=True))]
 
 
 def get_publication(slug: str, revision: int | None = None, *, include_archived_for_owner: int | None = None) -> dict[str, Any] | None:
@@ -791,7 +952,7 @@ def update_publication_metadata(owner_id: int, slug: str, metadata: dict[str, An
 
 def delete_project(user_id: int, project_id: int, *, expected_etag: str) -> tuple[str, dict[str, Any] | None]:
     existing = get_db().execute(
-        "SELECT name, project_json FROM projects WHERE id = ? AND user_id = ?",
+        "SELECT name, project_json FROM projects WHERE id = ? AND user_id = ? AND deleted_at IS NULL",
         (project_id, user_id),
     ).fetchone()
     if existing is None:
@@ -801,19 +962,84 @@ def delete_project(user_id: int, project_id: int, *, expected_etag: str) -> tupl
         return "stale", get_project(user_id, project_id)
     if expected_etag == "*":
         cursor = get_db().execute(
-            "DELETE FROM projects WHERE id = ? AND user_id = ?",
+            "DELETE FROM projects WHERE id = ? AND user_id = ? AND deleted_at IS NULL",
             (project_id, user_id),
         )
     else:
         cursor = get_db().execute(
             """
             DELETE FROM projects
-            WHERE id = ? AND user_id = ? AND name = ? AND project_json = ?
+            WHERE id = ? AND user_id = ? AND deleted_at IS NULL AND name = ? AND project_json = ?
             """,
             (project_id, user_id, existing["name"], existing["project_json"]),
         )
     if cursor.rowcount != 1:
         get_db().rollback()
         return "stale", get_project(user_id, project_id)
+    get_db().commit()
+    return "deleted", None
+
+
+def trash_project(user_id: int, project_id: int, *, expected_etag: str) -> tuple[str, dict[str, Any] | None]:
+    existing = get_db().execute(
+        "SELECT name, project_json FROM projects WHERE id = ? AND user_id = ? AND deleted_at IS NULL",
+        (project_id, user_id),
+    ).fetchone()
+    if existing is None:
+        return "missing", None
+    current_etag = project_etag(existing["name"], existing["project_json"])
+    if expected_etag != "*" and expected_etag != current_etag:
+        return "stale", get_project(user_id, project_id)
+    cursor = get_db().execute(
+        "UPDATE projects SET deleted_at = ?, updated_at = ? "
+        "WHERE id = ? AND user_id = ? AND deleted_at IS NULL",
+        (utc_now(), utc_now(), project_id, user_id),
+    )
+    if cursor.rowcount != 1:
+        get_db().rollback()
+        return "stale", get_project(user_id, project_id)
+    get_db().commit()
+    return "trashed", get_project(user_id, project_id, include_deleted=True)
+
+
+def restore_project(user_id: int, project_id: int, *, expected_etag: str) -> tuple[str, dict[str, Any] | None]:
+    existing = get_db().execute(
+        "SELECT name, project_json FROM projects WHERE id = ? AND user_id = ? AND deleted_at IS NOT NULL",
+        (project_id, user_id),
+    ).fetchone()
+    if existing is None:
+        return "missing", None
+    current_etag = project_etag(existing["name"], existing["project_json"])
+    if expected_etag != "*" and expected_etag != current_etag:
+        return "stale", get_project(user_id, project_id, include_deleted=True)
+    cursor = get_db().execute(
+        "UPDATE projects SET deleted_at = NULL, updated_at = ? "
+        "WHERE id = ? AND user_id = ? AND deleted_at IS NOT NULL",
+        (utc_now(), project_id, user_id),
+    )
+    if cursor.rowcount != 1:
+        get_db().rollback()
+        return "stale", get_project(user_id, project_id, include_deleted=True)
+    get_db().commit()
+    return "restored", get_project(user_id, project_id)
+
+
+def purge_project(user_id: int, project_id: int, *, expected_etag: str) -> tuple[str, dict[str, Any] | None]:
+    existing = get_db().execute(
+        "SELECT name, project_json FROM projects WHERE id = ? AND user_id = ? AND deleted_at IS NOT NULL",
+        (project_id, user_id),
+    ).fetchone()
+    if existing is None:
+        return "missing", None
+    current_etag = project_etag(existing["name"], existing["project_json"])
+    if expected_etag != "*" and expected_etag != current_etag:
+        return "stale", get_project(user_id, project_id, include_deleted=True)
+    cursor = get_db().execute(
+        "DELETE FROM projects WHERE id = ? AND user_id = ? AND deleted_at IS NOT NULL",
+        (project_id, user_id),
+    )
+    if cursor.rowcount != 1:
+        get_db().rollback()
+        return "stale", get_project(user_id, project_id, include_deleted=True)
     get_db().commit()
     return "deleted", None

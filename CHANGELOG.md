@@ -3,6 +3,13 @@
 All notable BackMars changes are recorded here. BackMars follows semantic
 versioning independently from webMARS and the Manual.
 
+## [0.6.0] — 2026-10-22
+
+- Added paginated v2 project metadata and document endpoints, stable client identities and idempotent creation.
+- Added a recycle bin with reversible deletion, restore and explicit permanent removal.
+- Added authenticated username updates for Google account setup and server-side publication filtering.
+- Added migration 7 and regression coverage for existing accounts, project concurrency and publication lists.
+
 ## [0.5.0] — 2026-10-20
 
 - Added optional Google OpenID Connect and Facebook sign-in with explicit linking to existing accounts.

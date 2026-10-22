@@ -24,6 +24,7 @@ from models import (
     reserve_registration_attempt,
     reset_password_with_account_code,
     update_user_password_hash,
+    update_user_username,
     verify_email_with_account_code,
 )
 from utils import (
@@ -300,6 +301,25 @@ def me() -> tuple[object, int]:
         return jsonify({"authenticated": False, "user": None}), 200
 
     return jsonify({"authenticated": True, "user": user}), 200
+
+
+@bp.patch("/api/me")
+@login_required
+def update_me() -> tuple[object, int]:
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict) or not isinstance(data.get("username"), str):
+        return json_error("A username is required.", field="username")
+    username = data["username"].strip()
+    if not _valid_username(username):
+        return json_error("Username is too long or contains control characters.", field="username")
+    user_id = current_user_id()
+    if user_id is None:
+        return json_error("Authentication required.", 401)
+    existing = get_user_by_username(username)
+    if existing and int(existing["id"]) != int(user_id):
+        return json_error("Username already exists.", 409, field="username")
+    user = update_user_username(int(user_id), username)
+    return jsonify({"ok": True, "user": user}), 200
 
 
 @bp.post("/api/password-reset/request")

@@ -12,6 +12,7 @@ from models import (
     get_publication,
     get_user_by_id,
     list_publications,
+    list_publication_revisions,
     update_publication_metadata,
 )
 from utils import (
@@ -261,12 +262,20 @@ def _list_window() -> tuple[int, int]:
 
 @bp.get("/api/publications")
 def browse_publications() -> tuple[object, int]:
-    query = str(request.args.get("q", "")).strip()
+    filters = {
+        "query": str(request.args.get("q", "")).strip(),
+        "author": str(request.args.get("author", "")).strip(),
+        "kind": str(request.args.get("kind", "")).strip(),
+        "language": str(request.args.get("language", "")).strip(),
+        "difficulty": str(request.args.get("difficulty", "")).strip(),
+        "sort": str(request.args.get("sort", "updated")).strip(),
+        "order": str(request.args.get("order", "desc")).strip(),
+    }
     try:
         limit, offset = _list_window()
     except (TypeError, ValueError):
         return json_error("limit and offset must be integers.")
-    page = list_publications(query=query, limit=limit + 1, offset=offset)
+    page = list_publications(limit=limit + 1, offset=offset, **filters)
     return jsonify({
         "publications": page[:limit],
         "limit": limit,
@@ -287,6 +296,12 @@ def own_publications() -> tuple[object, int]:
         offset=offset,
         owner_id=current_user_id(),
         query=str(request.args.get("q", "")).strip(),
+        author=str(request.args.get("author", "")).strip(),
+        kind=str(request.args.get("kind", "")).strip(),
+        language=str(request.args.get("language", "")).strip(),
+        difficulty=str(request.args.get("difficulty", "")).strip(),
+        sort=str(request.args.get("sort", "updated")).strip(),
+        order=str(request.args.get("order", "desc")).strip(),
     )
     return jsonify({
         "publications": page[:limit],
@@ -294,6 +309,28 @@ def own_publications() -> tuple[object, int]:
         "offset": offset,
         "hasMore": len(page) > limit,
     }), 200
+
+
+@bp.get("/api/publications/<slug>/revisions")
+def browse_publication_revisions(slug: str) -> tuple[object, int]:
+    try:
+        limit, offset = _list_window()
+    except (TypeError, ValueError):
+        return json_error("limit and offset must be integers.")
+    page = list_publication_revisions(
+        slug,
+        limit=limit + 1,
+        offset=offset,
+        owner_id=current_user_id(),
+    )
+    response = jsonify({
+        "revisions": page[:limit],
+        "limit": limit,
+        "offset": offset,
+        "hasMore": len(page) > limit,
+    })
+    response.headers["Cache-Control"] = "public, max-age=60"
+    return response, 200
 
 
 @bp.get("/api/publications/<slug>")

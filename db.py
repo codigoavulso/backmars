@@ -136,6 +136,8 @@ def ensure_database() -> None:
         # place without rebuilding or dropping an account.
         _add_column_if_missing("users", "email_verified_at", "TEXT")
         _add_column_if_missing("users", "session_version", "INTEGER NOT NULL DEFAULT 0")
+        _add_column_if_missing("projects", "client_project_id", "TEXT")
+        _add_column_if_missing("projects", "deleted_at", "TEXT")
         _add_column_if_missing("oauth_flows", "context", "TEXT NOT NULL DEFAULT 'public'")
         _add_column_if_missing("oauth_flows", "attempt_id", "INTEGER")
         _add_column_if_missing(
@@ -150,6 +152,14 @@ def ensure_database() -> None:
         connection.execute(
             "CREATE UNIQUE INDEX idx_projects_user_name ON projects (user_id, name COLLATE NOCASE)"
         )
+        connection.execute("DROP INDEX IF EXISTS idx_projects_user_updated")
+        connection.execute(
+            "CREATE INDEX idx_projects_user_updated ON projects (user_id, deleted_at, updated_at DESC)"
+        )
+        connection.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_projects_user_client_id "
+            "ON projects (user_id, client_project_id) WHERE client_project_id IS NOT NULL"
+        )
         connection.execute(
             "INSERT OR IGNORE INTO schema_migrations (version, applied_at) VALUES (?, datetime('now'))",
             (4,),
@@ -161,6 +171,10 @@ def ensure_database() -> None:
         connection.execute(
             "INSERT OR IGNORE INTO schema_migrations (version, applied_at) VALUES (?, datetime('now'))",
             (6,),
+        )
+        connection.execute(
+            "INSERT OR IGNORE INTO schema_migrations (version, applied_at) VALUES (?, datetime('now'))",
+            (7,),
         )
         connection.commit()
     except Exception:
