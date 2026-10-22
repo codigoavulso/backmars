@@ -91,7 +91,7 @@ Do not expose Gunicorn directly or trust arbitrary `X-Forwarded-For` headers.
 
 Use a dedicated test account and project:
 
-1. `GET /api/health` reports `version: 0.5.0` and `mailConfigured: true`.
+1. `GET /api/health` reports `version: 0.6.0` and `mailConfigured: true`.
 2. Registration queues one verification message; confirm the six-digit code.
 3. Login works by username and email and sets Secure, HttpOnly session cookie.
 4. Request password reset, use the code once, confirm the old password fails and
