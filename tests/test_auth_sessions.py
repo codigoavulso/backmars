@@ -22,7 +22,7 @@ class PersistentAuthSessionTests(unittest.TestCase):
         response = self.client.get("/api/health")
 
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.get_json()["version"], "0.5.0")
+        self.assertEqual(response.get_json()["version"], "0.6.0")
 
     def test_capabilities_describe_the_project_and_publication_contracts(self) -> None:
         response = self.client.get("/api/capabilities")

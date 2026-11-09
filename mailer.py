@@ -21,7 +21,7 @@ def mail_is_configured() -> bool:
     )
 
 
-def send_mail(to_address: str, subject: str, text: str, html: str = "") -> bool:
+def send_mail(to_address: str, subject: str, text: str, html: str = "", *, attachments=()) -> bool:
     """Send one transactional message through the deployment's SMTP relay.
 
     Tests and embedded deployments may inject MAIL_SEND_FUNCTION.  Production
@@ -29,7 +29,8 @@ def send_mail(to_address: str, subject: str, text: str, html: str = "") -> bool:
     """
     override: Callable[..., object] | None = current_app.config.get("MAIL_SEND_FUNCTION")
     if callable(override):
-        override(to_address=to_address, subject=subject, text=text, html=html)
+        override(to_address=to_address, subject=subject, text=text, html=html,
+                 **({"attachments": attachments} if attachments else {}))
         return True
     if not mail_is_configured():
         current_app.logger.warning("Transactional mail requested, but SMTP is not configured.")
@@ -43,6 +44,10 @@ def send_mail(to_address: str, subject: str, text: str, html: str = "") -> bool:
     message.set_content(str(text))
     if html:
         message.add_alternative(str(html), subtype="html")
+
+    for filename, mime, content in attachments:
+        maintype, subtype = mime.split("/", 1)
+        message.add_attachment(content, maintype=maintype, subtype=subtype, filename=filename)
 
     host = str(config["SMTP_HOST"])
     port = int(config["SMTP_PORT"])

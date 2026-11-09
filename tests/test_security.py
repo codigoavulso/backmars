@@ -269,6 +269,15 @@ class RequestSizeLimitTests(ServiceTestCase):
 
 
 class CorsHeaderTests(ServiceTestCase):
+    def test_username_update_is_allowed_by_browser_preflight(self) -> None:
+        response = self.client.options("/api/me", headers={
+            "Origin": "http://localhost:4173",
+            "Access-Control-Request-Method": "PATCH",
+            "Access-Control-Request-Headers": "content-type,x-webmars-context",
+        })
+        self.assertEqual(response.headers["Access-Control-Allow-Origin"], "http://localhost:4173")
+        self.assertIn("PATCH", response.headers["Access-Control-Allow-Methods"].split(", "))
+
     def test_the_locking_header_is_allowed_and_the_etag_is_exposed(self) -> None:
         response = self.client.get(
             "/api/health",

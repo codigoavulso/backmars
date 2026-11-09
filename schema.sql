@@ -36,6 +36,19 @@ CREATE TABLE IF NOT EXISTS account_counters (
     PRIMARY KEY (bucket, event, method, context)
 );
 
+CREATE TABLE IF NOT EXISTS account_metric_sessions (
+    session_hash TEXT PRIMARY KEY,
+    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    linked_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_account_metric_sessions_age ON account_metric_sessions(linked_at);
+
+CREATE TABLE IF NOT EXISTS feedback_attempts (
+    address_hash TEXT NOT NULL,
+    received INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_feedback_attempts_age ON feedback_attempts(received);
+
 CREATE TABLE IF NOT EXISTS account_visits (
     bucket INTEGER NOT NULL, user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     context TEXT NOT NULL, PRIMARY KEY(bucket, user_id, context)

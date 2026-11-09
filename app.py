@@ -133,6 +133,11 @@ def create_app(config_overrides: dict[str, Any] | None = None) -> Flask:
     if trusted_proxies > 0:
         app.wsgi_app = ProxyFix(app.wsgi_app, x_for=trusted_proxies, x_proto=trusted_proxies)
 
+    app.config.setdefault("INTERNAL_USERNAMES", os.getenv("BACKMARS_INTERNAL_USERNAMES", ""))
+    app.config.setdefault("INTERNAL_USER_IDS", os.getenv("BACKMARS_INTERNAL_USER_IDS", ""))
+    app.config.setdefault("METRICS_INTERNAL_RELAY", os.getenv("BACKMARS_METRICS_INTERNAL_RELAY") == "1")
+    app.config.setdefault("FEEDBACK_TO", os.getenv("BACKMARS_FEEDBACK_TO", ""))
+
     init_db_app(app)
     app.register_blueprint(auth_bp)
     app.register_blueprint(projects_bp)
@@ -145,6 +150,8 @@ def create_app(config_overrides: dict[str, Any] | None = None) -> Flask:
     from account_statistics import init_app as init_account_statistics
     init_social_auth(app)
     init_account_statistics(app)
+    from feedback import init_app as init_feedback
+    init_feedback(app)
 
     @app.get("/api/health")
     def health() -> tuple[dict[str, object], int]:
@@ -200,7 +207,7 @@ def create_app(config_overrides: dict[str, Any] | None = None) -> Flask:
             # back off the response.
             response.headers["Access-Control-Allow-Headers"] = "Content-Type, If-Match, X-WebMARS-Context"
             response.headers["Access-Control-Expose-Headers"] = "ETag"
-            response.headers["Access-Control-Allow-Methods"] = "GET, POST, PUT, DELETE, OPTIONS"
+            response.headers["Access-Control-Allow-Methods"] = "GET, POST, PUT, PATCH, DELETE, OPTIONS"
         return response
 
     @app.errorhandler(HTTPException)
